@@ -248,6 +248,19 @@
   function accountMembers(state, account) {
     return (account.members === undefined ? [account.account] : account.members) ?? (state.tracking?.mappings || []).filter(m => m.field === account.field).map(m => m.account);
   }
+  function mergeVehicle(state, patch) {
+    if(!keysExactly(patch,['kind','version','accounts','notes']) || patch.kind!=='vehicle-update' || patch.version!==1 || !Array.isArray(patch.accounts) || patch.accounts.length!==2 || !Array.isArray(patch.notes) || patch.notes.length>3)fail('车辆更新文件格式无效');
+    if(!patch.accounts.some(a=>a.account==='汽车' && a.field==='otherAssets') || !patch.accounts.some(a=>a.account==='车贷' && a.field==='otherDebt'))fail('车辆更新账户不匹配');
+    const names=new Set(patch.accounts.map(a=>a.account)), ids=new Set(patch.notes.map(n=>n.id));
+    if(patch.notes.some(n=>!['vehicle-loan-plan','vehicle-market-estimate','property-sold'].includes(n.id)))fail('车辆更新记录不匹配');
+    const accounts=state.accounts.filter(a=>!names.has(a.account));
+    for(const field of ['otherAssets','otherDebt']) {
+      const aggregate=accounts.find(a=>a.field===field && a.members===null);
+      if(aggregate && aggregate.balance!==null && aggregate.balance!==0)fail('家庭分类已有汇总金额，请先拆分以避免重复计入');
+    }
+    const next={...state,accounts:[...accounts.filter(a=>!(['otherAssets','otherDebt'].includes(a.field) && a.members===null)),...patch.accounts],notes:[...state.notes.filter(n=>!ids.has(n.id)),...patch.notes]};
+    const checked=validateState(next);assets(checked);return checked;
+  }
   function scheduledLoan(state, account, until = new Date().toISOString()) {
     const note=state.notes?.find(n=>n.id==='vehicle-loan-plan' && n.status==='confirmed');
     if(!note || account.field!=='otherDebt' || !account.debt || account.balance===null)return null;
@@ -436,7 +449,7 @@
     if (payload?.rc !== 0 || data?.f57 !== '688111' || !Number.isInteger(data.f43) || data.f43 <= 0 || data.f43 > 100000000 || !Number.isInteger(data.f86) || data.f86 < 946684800 || data.f86 * 1000 > now + 300000) fail('行情数据不可用');
     return { price: data.f43, at: new Date(data.f86 * 1000).toISOString() };
   }
-  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime, ledgerDiff, reconcile, capture, moneyFields, debtFields, purposes, ledgerChanges, accountMembers, accountProjection, scheduledLoan, migrateAccounts, saveAccount, splitAccount, financial, transactionKey, noteMatches, cashflow, equityScenario };
+  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime, ledgerDiff, reconcile, capture, moneyFields, debtFields, purposes, ledgerChanges, accountMembers, accountProjection, mergeVehicle, scheduledLoan, migrateAccounts, saveAccount, splitAccount, financial, transactionKey, noteMatches, cashflow, equityScenario };
   root.FinanceCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

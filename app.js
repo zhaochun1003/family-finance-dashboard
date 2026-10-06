@@ -421,7 +421,14 @@
     const file = e.target.files[0]; if (!file) return;
     try {
       if (file.size > 25 * 1024 * 1024) throw new Error('备份超过 25 MB');
-      const next = C.validateState(JSON.parse(await file.text())); C.assets(next);
+      const raw=JSON.parse(await file.text());
+      if(raw.kind==='vehicle-update'){
+        if(storageBlocked)throw new Error('当前存储不可读取，暂不能合并车辆更新');
+        const next=C.mergeVehicle(state,raw);
+        if(!confirm('仅更新汽车估值、车贷及相关说明，账本、金融账户与股价保持。确认导入？'))return;
+        commit(next,'汽车估值与固定车贷计划已更新。');return;
+      }
+      const next = C.validateState(raw); C.assets(next);
       if (!confirm('此备份将覆盖当前浏览器的账本、资产快照和股价设置。建议先导出当前备份。确定恢复？')) return;
       quoteEpoch++; quoteStatus = '已恢复备份中的价格；等待刷新';
       if (commit(next, '备份已恢复到当前浏览器。', true)) { await recovery('clear'); $('undo-import').hidden = true; } refreshQuote();
