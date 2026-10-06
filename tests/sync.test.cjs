@@ -21,7 +21,7 @@ async function syncHarness(local,cloud,base,{enabled=true,invalid=false,blocked=
     calls.push([path,options?.method||'GET']);
     if(path==='/api/status')return Response.json({available:true,configured:true});
     if(path==='/api/me')return Response.json({authenticated:true});
-    const S=window.FinanceSync,payload=await S.pack(S.canonical(cloud));
+    const S=window.FinanceSync,payload=await S.pack(JSON.stringify(cloud));
     return Response.json({revision:2,payload,digest:invalid?'0'.repeat(64):await S.hash(payload),updated_at:'2026-01-01T00:00:00Z'});
   }};
   vm.runInNewContext(readFileSync(require('node:path').join(__dirname,'../sync.js'),'utf8'),context);
@@ -60,4 +60,11 @@ test('enabling persists before a blocked reconciliation and survives reload',asy
   assert.ok(!first.calls.some(c=>c[0].startsWith('/api/snapshot')));
   const refreshed=await syncHarness(local,fictional(200),base,{initialStorage:first.storage});
   assert.equal(refreshed.applied.length,1);
+});
+
+test('a device without a quote adopts the last successful cloud quote',async()=>{
+  const local=fictional(100),cloud=fictional(200);
+  cloud.quote.automatic={price:12345,at:'2026-01-01T00:00:00Z'};
+  const result=await syncHarness(local,cloud,await canonicalHash(local));
+  assert.equal(result.applied[0].quote.automatic.price,12345);
 });

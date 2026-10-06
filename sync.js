@@ -45,12 +45,14 @@
     async function adopt(row) {
       if(!enabled)return;
       if(adapter.blocked()){status('云端有更新，完成当前操作后会自动读取。');return;}
-      const next={...row.state,quote:{...row.state.quote,automatic:adapter.get().quote.automatic}};
+      const localQuote=adapter.get().quote.automatic,cloudQuote=row.state.quote.automatic;
+      const automatic=localQuote&&(!cloudQuote||Date.parse(localQuote.at)>=Date.parse(cloudQuote.at))?localQuote:cloudQuote;
+      const next={...row.state,quote:{...row.state.quote,automatic}};
       if(!adapter.apply(next))throw new Error('无法保存云端数据，本地原数据保留');
       save(row.revision,row.base);status('已同步 · '+new Date(row.updated_at).toLocaleString('zh-CN'));conflict=null;$('sync-conflict').hidden=true;
     }
     async function upload(revision) {
-      const text=canonical(adapter.get()),base=await hash(text),payload=await pack(text);
+      const text=canonical(adapter.get()),base=await hash(text),payload=await pack(JSON.stringify(adapter.get()));
       if(!enabled)return;
       const row=await api('/api/snapshot',{method:'PUT',body:JSON.stringify({revision,payload,digest:await hash(payload)})});
       save(row.revision,base);status('已同步 · '+new Date(row.updated_at).toLocaleTimeString('zh-CN'));
@@ -66,7 +68,15 @@
         let localBase=await hash(canonical(adapter.get()));
         if(meta&&meta.base!==null&&head.revision===meta.revision){
           if(localBase!==meta.base){status('正在同步…');await upload(head.revision);}
-          else status(head.revision?'已同步 · 自动同步已开启':'云端为空，更新数据后会自动同步。');
+          else if(head.revision){
+            const row=await remote();
+            if(!enabled)return;
+            if(row.revision!==meta.revision||await hash(canonical(adapter.get()))!==meta.base){again=true;return;}
+            const localQuote=adapter.get().quote.automatic,cloudQuote=row.state.quote.automatic;
+            if(localQuote&&(!cloudQuote||Date.parse(localQuote.at)>Date.parse(cloudQuote.at)))await upload(head.revision);
+            else if(cloudQuote&&(!localQuote||Date.parse(cloudQuote.at)>Date.parse(localQuote.at)))await adopt(row);
+            else status('已同步 · 自动同步已开启');
+          }else status('云端为空，更新数据后会自动同步。');
           return;
         }
         const row=await remote();
