@@ -227,3 +227,12 @@ test('import change preview preserves duplicate multiplicity and includes old/ne
  const row=C.parseRows(sample)[0],changed={...row,account:'虚构账户'};
  const diff=C.ledgerChanges([row,row],[row,changed]);assert.deepEqual(diff.added,[changed]);assert.deepEqual(diff.removed,[row]);
 });
+
+ test('fixed interest-free loan reduces only debt at due dates and floors at zero',()=>{
+ const s=C.emptyState();s.notes=[{id:'vehicle-loan-plan',status:'confirmed',source:JSON.stringify({version:1,account:'测试车贷',monthly:10000,day:20})}];
+ const a={account:'测试车贷',field:'otherDebt',debt:true,balance:25000,at:'2025-01-21T00:00:00Z'};
+ assert.equal(C.scheduledLoan(s,a,'2025-02-19T00:00:00Z').balance,25000);
+ assert.equal(C.scheduledLoan(s,a,'2025-02-21T00:00:00Z').balance,15000);
+ assert.equal(C.scheduledLoan(s,a,'2025-05-21T00:00:00Z').balance,0);
+ s.notes[0].source='invalid';assert.equal(C.scheduledLoan(s,a),null);
+ });

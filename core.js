@@ -248,7 +248,22 @@
   function accountMembers(state, account) {
     return (account.members === undefined ? [account.account] : account.members) ?? (state.tracking?.mappings || []).filter(m => m.field === account.field).map(m => m.account);
   }
+  function scheduledLoan(state, account, until = new Date().toISOString()) {
+    const note=state.notes?.find(n=>n.id==='vehicle-loan-plan' && n.status==='confirmed');
+    if(!note || account.field!=='otherDebt' || !account.debt || account.balance===null)return null;
+    let plan;try{plan=JSON.parse(note.source);}catch{return null;}
+    if(plan.version!==1 || plan.account!==account.account || !Number.isSafeInteger(plan.monthly) || plan.monthly<=0 || !Number.isInteger(plan.day) || plan.day<1 || plan.day>28)return null;
+    const start=localTime(account.at),end=localTime(until);
+    if(end<start)return null;
+    const index=d=>Number(d.slice(0,4))*12+Number(d.slice(5,7))-1;
+    let paid=0;for(let m=index(start);m<=index(end);m++){
+      const date=String(Math.floor(m/12)).padStart(4,'0')+'-'+String(m%12+1).padStart(2,'0')+'-'+String(plan.day).padStart(2,'0')+'T23:59:59';
+      if(date>start && date<=end)paid++;
+    }
+    return {balance:Math.max(0,account.balance-paid*plan.monthly),applied:paid,through:null,issues:[],scheduled:true};
+  }
   function accountProjection(state, account, until = null) {
+    const scheduled=scheduledLoan(state,account,until || new Date().toISOString());if(scheduled)return scheduled;
     const start = localTime(account.at), end = until ? localTime(until) : '9999';
     const members = new Set(accountMembers(state, account)), issues = [];
     let balance = account.balance, applied = 0, through = null;
@@ -421,7 +436,7 @@
     if (payload?.rc !== 0 || data?.f57 !== '688111' || !Number.isInteger(data.f43) || data.f43 <= 0 || data.f43 > 100000000 || !Number.isInteger(data.f86) || data.f86 < 946684800 || data.f86 * 1000 > now + 300000) fail('行情数据不可用');
     return { price: data.f43, at: new Date(data.f86 * 1000).toISOString() };
   }
-  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime, ledgerDiff, reconcile, capture, moneyFields, debtFields, purposes, ledgerChanges, accountMembers, accountProjection, migrateAccounts, saveAccount, splitAccount, financial, transactionKey, noteMatches, cashflow, equityScenario };
+  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime, ledgerDiff, reconcile, capture, moneyFields, debtFields, purposes, ledgerChanges, accountMembers, accountProjection, scheduledLoan, migrateAccounts, saveAccount, splitAccount, financial, transactionKey, noteMatches, cashflow, equityScenario };
   root.FinanceCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

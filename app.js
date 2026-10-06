@@ -133,8 +133,8 @@
     $('property-history').hidden=!state.notes.some(n=>/售房|卖房|房产处置/.test(n.detail+' '+n.title));
     for(const name of ['汽车','车贷']) {
       const account=state.accounts.find(a=>a.account===name && a.field===(['车贷','房贷'].includes(name)?'otherDebt':'otherAssets'));
-      const row=element('div');row.append(element('span',name),element('strong',account?.balance==null?'金额待核对':money(account.balance)+' 元'));
-      if(account)row.append(element('small','核对日期 '+time(account.at),'muted'));familyItems.append(row);
+      const row=element('div');row.append(element('span',name),element('strong',account?.balance==null?'金额待核对':money(projection?.rows.find(r=>r.account===account.account)?.balance ?? account.balance)+' 元'));
+      if(account)row.append(element('small',(C.scheduledLoan(state,account)?'按固定免息还款计划推算 · 基准日期 ':'估值／核对日期 ')+time(account.at),'muted'));familyItems.append(row);
     }
   }
   function renderQuote() {
