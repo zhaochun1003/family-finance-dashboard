@@ -1,14 +1,14 @@
 /* Pure calculations and validation. Shared by the browser and Node checks. */
 (function (root) {
   'use strict';
-  const VERSION = 3;
+  const VERSION = 4;
   const MAX_RECORDS = 100000;
   const MAX_CENTS = 10000000000000;
   const fields = [
     ['cash', '现金 / 活期', '元'], ['wealth', '理财', '元'],
     ['provident', '公积金', '元'], ['shares', '金山办公持股', '股'],
-    ['shortDebt', '信用卡等短期负债', '元'], ['otherAssets', '其他资产', '元'],
-    ['otherDebt', '其他负债', '元'], ['unvested', '待归属股票', '股']
+    ['shortDebt', '信用卡等短期负债', '元'], ['otherAssets', '其他家庭资产', '元'],
+    ['otherDebt', '其他家庭负债', '元'], ['unvested', '待归属股票', '股']
   ];
   const salaryCategories = new Set(['工资薪水', '工资收入', '加班收入']);
   const types = new Set(['收入', '支出', '转账', '借贷']);
@@ -92,8 +92,10 @@
   }
   function summarize(transactions) {
     const years = new Map();
-    let start = null, end = null, total = 0, excluded = 0;
+    let start = null, end = null, total = 0, excluded = 0, absoluteTotal = 0;
     for (const t of transactions) {
+      absoluteTotal += Math.abs(t.amount);
+      if (!Number.isSafeInteger(absoluteTotal)) fail('账本总金额超出可精确计算范围');
       if (!start || t.date < start) start = t.date;
       if (!end || t.date > end) end = t.date;
       const year = t.date.slice(0, 4);
@@ -109,14 +111,15 @@
     }
     return { years: [...years.values()].sort((a, b) => a.year.localeCompare(b.year)), start, end, total, count: transactions.length, excluded };
   }
-  function emptyState() { return { version: VERSION, ledger: null, snapshot: null, quote: { mode: 'auto', manual: null, automatic: null }, tracking: null, history: [], accounts: [] }; }
+  function emptyState() { return { version: VERSION, ledger: null, snapshot: null, quote: { mode: 'auto', manual: null, automatic: null }, tracking: null, history: [], accounts: [], notes: [], scenario: null }; }
   function validLocalTime(value) { return typeof value === 'string' && /^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(value) && validDate(value.slice(0, 10)); }
   function localTime(iso) { return new Date(Date.parse(iso) + 8 * 3600000).toISOString().slice(0, 19); }
   function isTime(value) { return typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test(value) && Number.isFinite(Date.parse(value)); }
   function validateState(raw) {
     if (raw?.version === 1 && keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote'])) raw = { ...raw, version: 2, tracking: null };
-    if (raw?.version === 2 && keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote', 'tracking'])) raw = { ...raw, version: VERSION, history: [], accounts: [] };
-    if (!keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote', 'tracking', 'history', 'accounts']) || raw.version !== VERSION) fail('备份格式或版本不受支持');
+    if (raw?.version === 2 && keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote', 'tracking'])) raw = { ...raw, version: 3, history: [], accounts: [] };
+    if (raw?.version === 3 && keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote', 'tracking', 'history', 'accounts'])) raw = { ...raw, version: VERSION, accounts: migrateAccounts(raw), notes: [], scenario: null };
+    if (!keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote', 'tracking', 'history', 'accounts', 'notes', 'scenario']) || raw.version !== VERSION) fail('备份格式或版本不受支持');
     if (raw.ledger !== null) {
       const l = raw.ledger;
       if (!keysExactly(l, ['importedAt', 'transactions']) || !isTime(l.importedAt) || !Array.isArray(l.transactions) || !l.transactions.length || l.transactions.length > MAX_RECORDS) fail('账本备份无效');
@@ -159,9 +162,22 @@
     }
     const accountNames = new Set();
     for (const a of raw.accounts) {
-      if (!keysExactly(a, ['account', 'debt', 'at', 'balance']) || typeof a.account !== 'string' || !a.account.trim() || a.account.length > 200 || accountNames.has(a.account) || typeof a.debt !== 'boolean' || !isTime(a.at) || !Number.isSafeInteger(a.balance) || a.balance < 0 || a.balance > MAX_CENTS) fail('账户余额格式无效');
+      if (!keysExactly(a, ['account', 'debt', 'at', 'balance', 'field', 'members']) || typeof a.account !== 'string' || !a.account.trim() || a.account.length > 200 || accountNames.has(a.account) || typeof a.debt !== 'boolean' || !isTime(a.at) || (a.balance !== null && (!Number.isSafeInteger(a.balance) || a.balance < 0 || a.balance > MAX_CENTS))) fail('账户余额格式无效');
+      if (a.field !== null && !moneyFields.includes(a.field)) fail('账户资产分类无效');
+      if (a.field !== null && a.debt !== debtFields.includes(a.field)) fail('账户负债分类不一致');
+      if (a.members !== null && (!Array.isArray(a.members) || a.members.length > 500 || new Set(a.members).size !== a.members.length || a.members.some(m => typeof m !== 'string' || !m.trim() || m.length > 200))) fail('账户关联名称无效');
+      if (a.field !== null && a.members === null && raw.accounts.some(b => b !== a && b.field === a.field)) fail('分类汇总与明细不能重复计入，请先拆分汇总账户');
       accountNames.add(a.account);
     }
+    const linked = new Set();
+    for (const a of raw.accounts.filter(a => a.field !== null && a.members !== null)) for (const m of a.members) { if (linked.has(m)) fail('同一账本账户不能关联多个余额'); linked.add(m); }
+    if (!Array.isArray(raw.notes) || raw.notes.length > 1000) fail('核实记录格式无效');
+    const noteIds = new Set();
+    for (const n of raw.notes) {
+      if (!keysExactly(n, ['id','title','detail','source','status','purpose','keys']) || typeof n.id !== 'string' || !n.id || n.id.length > 100 || noteIds.has(n.id) || !['confirmed','pending'].includes(n.status) || !purposes.includes(n.purpose) || !Array.isArray(n.keys) || n.keys.length > 200 || n.keys.some(k => typeof k !== 'string' || k.length > 2000) || ['title','detail','source'].some(k => typeof n[k] !== 'string' || n[k].length > (k === 'title' ? 200 : 5000)) || !n.title.trim()) fail('核实记录内容无效');
+      noteIds.add(n.id);
+    }
+    if (raw.scenario !== null && (!keysExactly(raw.scenario, ['price','subscription','tax']) || ['price','subscription','tax'].some(k => raw.scenario[k] !== null && (!Number.isSafeInteger(raw.scenario[k]) || raw.scenario[k] < 0 || raw.scenario[k] > MAX_CENTS)) || raw.scenario.price === 0 || raw.scenario.price > 100000000)) fail('股权情景格式无效');
     return JSON.parse(JSON.stringify(raw));
   }
   function accountMovements(t) {
@@ -188,7 +204,7 @@
     }
     return [...accounts].sort((a, b) => a.localeCompare(b, 'zh-CN'));
   }
-  function project(state) {
+  function legacyProject(state) {
     const baseline = state.snapshot;
     if (!baseline) return null;
     const values = { ...baseline.values }, asOf = localTime(baseline.asOf || baseline.savedAt);
@@ -220,9 +236,134 @@
     if (result.issues.length) { result.values = { ...baseline.values }; result.applied = 0; result.through = null; }
     return result;
   }
+
+  const moneyFields = ['cash','wealth','provident','shortDebt','otherAssets','otherDebt'];
+  const debtFields = ['shortDebt','otherDebt'];
+  const purposes = ['unknown','consumption','family','investment','debt','refund','adjustment'];
+  function migrateAccounts(state) {
+    const accounts = (state.accounts || []).map(a => ({ ...a, field: null, members: [a.account] }));
+    if (state.snapshot) for (const field of moneyFields) accounts.push({ account: `分类汇总 · ${fields.find(f => f[0] === field)[1]}`, field, members: null, debt: debtFields.includes(field), balance: state.snapshot.values[field], at: state.snapshot.asOf || state.snapshot.savedAt });
+    return accounts;
+  }
+  function accountMembers(state, account) {
+    return (account.members === undefined ? [account.account] : account.members) ?? (state.tracking?.mappings || []).filter(m => m.field === account.field).map(m => m.account);
+  }
+  function accountProjection(state, account, until = null) {
+    const start = localTime(account.at), end = until ? localTime(until) : '9999';
+    const members = new Set(accountMembers(state, account)), issues = [];
+    let balance = account.balance, applied = 0, through = null;
+    if (!state.tracking?.enabled) return { balance, applied, through, issues };
+    const records = state.ledger?.transactions || [];
+    if (!state.ledger) return { balance, applied, through, issues: ['未导入账本，展示实际余额基准'] };
+    if (records.length && summarize(records).start > start.slice(0,10)) issues.push('账本未覆盖余额基准日');
+    for (const t of records) {
+      if (t.date < start.slice(0,10) || t.date > end.slice(0,10) || (t.at && (t.at <= start || t.at > end))) continue;
+      try {
+        const moves = accountMovements(t).filter(m => members.has(m.account));
+        if (!moves.length) continue;
+        if (!t.at) fail('交易缺少具体时间');
+        if (balance === null) fail('起始余额未知');
+        if (t.category.split('/').at(-1).trim() === '股票') fail('股票交易需核对持股及现金');
+        for (const m of moves) balance += account.debt ? -m.delta : m.delta;
+        applied++; if (!through || t.at > through) through = t.at;
+      } catch(e) { if (issues.length < 20) issues.push(`${t.at || t.date}：${e.message}`); }
+    }
+    if (balance !== null && (!Number.isSafeInteger(balance) || balance < 0 || balance > MAX_CENTS)) issues.push('推算余额异常');
+    return { balance: issues.length ? account.balance : balance, applied: issues.length ? 0 : applied, through: issues.length ? null : through, issues };
+  }
+  function project(state) {
+    if (!state.accounts?.some(a => a.field !== null)) return legacyProject(state);
+    const values = state.snapshot ? { ...state.snapshot.values } : Object.fromEntries(fields.map(([key]) => [key,null]));
+    const result = { values, asOf: null, through: null, active: Boolean(state.tracking?.enabled), applied: 0, issues: [], rows: [] };
+    for (const field of moneyFields) {
+      const list = state.accounts.filter(a => a.field === field);
+      values[field] = list.length && list.every(a => a.balance !== null) ? 0 : null;
+      for (const a of list) {
+        const p = accountProjection(state,a); result.rows.push({ ...a, ...p });
+        if (values[field] !== null) values[field] += p.balance;
+        result.applied += p.applied;
+        if (p.through && (!result.through || p.through > result.through)) result.through = p.through;
+        result.issues.push(...p.issues.map(i => `${a.account}：${i}`));
+      }
+    }
+    if (result.active && state.ledger) {
+      const included = state.accounts.filter(a => a.field !== null), earliest = included.map(a => localTime(a.at)).sort()[0];
+      const owned = new Set(included.flatMap(a => accountMembers(state,a))), map = new Map((state.tracking?.mappings || []).map(m => [m.account,m.field]));
+      for (const t of state.ledger.transactions) {
+        if (t.date < earliest.slice(0,10) || (t.at && t.at <= earliest)) continue;
+        try { for (const move of accountMovements(t)) if (!owned.has(move.account) && map.get(move.account) !== 'ignore') fail(`账户“${move.account}”未纳入余额或明确排除`); }
+        catch(e) { if (result.issues.length < 40) result.issues.push(`${t.at || t.date}：${e.message}`); }
+      }
+    }
+    if (result.issues.length) {
+      // Never present a mix of partly updated accounts as a current complete balance sheet.
+      for (const field of moneyFields) { const list=state.accounts.filter(a=>a.field===field); values[field]=list.length && list.every(a=>a.balance!==null) ? list.reduce((sum,a)=>sum+a.balance,0) : null; }
+      result.applied = 0; result.through = null;
+      result.rows = result.rows.map(a => ({ ...a, balance: state.accounts.find(b=>b.account===a.account).balance }));
+    }
+    return result;
+  }
+  function saveAccount(state, account) {
+    const accounts = [...state.accounts.filter(a => a.account !== account.account), account];
+    const next = { ...state, accounts };
+    if (!next.snapshot) next.snapshot = { savedAt: account.at, asOf: account.at, values: Object.fromEntries(fields.map(([key])=>[key,null])) };
+    return validateState(next);
+  }
+  function splitAccount(state, accountName, entries, at) {
+    const group=state.accounts.find(a=>a.account===accountName);
+    if (!group || group.members !== null || group.field === null) fail('只能拆分分类汇总');
+    const p=accountProjection(state,group);
+    if (p.issues.length || p.balance === null) fail('请先核实分类总余额，再拆分');
+    if (!entries.length || entries.reduce((sum,a)=>sum+a.balance,0)!==p.balance) fail('明细合计必须与分类当前展示余额一致');
+    const names=new Set(entries.map(a=>a.account));
+    if (names.size !== entries.length) fail('账户名称重复');
+    const accounts=state.accounts.filter(a=>a.account!==accountName && !(a.field===null && names.has(a.account)));
+    for (const a of entries) accounts.push({ ...a, debt:group.debt,field:group.field,members:[a.account],at });
+    const mappings=(state.tracking?.mappings || []).filter(m=>!names.has(m.account));
+    for (const name of names) mappings.push({account:name,field:group.field});
+    return validateState({ ...state, accounts, tracking: {enabled:Boolean(state.tracking?.enabled),mappings} });
+  }
+  function financial(state) {
+    const result=assets(state); if (!result) return null;
+    const items=result.items.filter(([key])=>['cash','wealth','provident','shares','shortDebt'].includes(key));
+    const filled=items.filter(([,v])=>v!==null), total=filled.reduce((sum,[,v])=>sum+v,0);
+    const positive=filled.reduce((sum,[,v])=>sum+Math.max(0,v),0);
+    return {total,partial:filled.length!==items.length,any:filled.length>0,stock:result.stock,positive,concentration:result.stock!==null && positive>0 ? result.stock/positive : null, liquid:result.items.find(([k])=>k==='cash')[1]===null || result.items.find(([k])=>k==='wealth')[1]===null || result.items.find(([k])=>k==='shortDebt')[1]===null ? null : project(state).values.cash+project(state).values.wealth-project(state).values.shortDebt};
+  }
+  function transactionKey(t) { return JSON.stringify([t.date,t.at ?? null,t.type,t.category,t.amount,t.currency,t.account ?? null]); }
+  function noteMatches(state,note) {
+    const counts=new Map(); for (const t of state.ledger?.transactions || []) { const k=transactionKey(t); counts.set(k,(counts.get(k)||0)+1); }
+    return note.keys.map(key=>({key,count:counts.get(key)||0}));
+  }
+  function cashflow(state, month) {
+    let income=0,expense=0,transfers=0,loans=0,unreviewed=0;
+    const buckets=Object.fromEntries(purposes.map(p=>[p,0]));
+    const counts=new Map();for(const t of state.ledger?.transactions||[]){const key=transactionKey(t);counts.set(key,(counts.get(key)||0)+1);}
+    const notes=state.notes.filter(n=>n.status==='confirmed' && n.purpose!=='unknown');
+    for (const t of state.ledger?.transactions || []) {
+      if (!t.date.startsWith(month)) continue;
+      if (t.type==='转账') {transfers++;continue;} if(t.type==='借贷'){loans++;continue;}
+      if(t.type==='收入') income+=t.amount; else expense+=t.amount;
+      const matches=notes.filter(n=>n.keys.includes(transactionKey(t)));
+      const purpose=matches.length===1 && counts.get(transactionKey(t))===1 ? matches[0].purpose : 'unknown';
+      buckets[purpose]+=t.type==='收入' ? t.amount : -t.amount;
+      if(purpose==='unknown') unreviewed++;
+    }
+    return {income,expense,difference:income-expense,transfers,loans,unreviewed,buckets};
+  }
+  function equityScenario(state) {
+    const p=project(state), f=financial(state), scenario=state.scenario;
+    if(!p || !f || !scenario || Object.values(scenario).some(v=>v===null) || p.values.shares===null || p.values.unvested===null || f.partial || f.liquid===null || f.stock===null) return null;
+    const stock=(p.values.shares+p.values.unvested)*scenario.price;
+    const cost=scenario.subscription+scenario.tax;
+    const total=f.total-f.stock+stock-cost;
+    if (![stock,cost,total].every(Number.isSafeInteger)) fail('情景金额超出范围');
+    return {stock,total,liquid:f.liquid-cost,cost};
+  }
+
   function activeQuote(state) { return state.quote.mode === 'manual' ? state.quote.manual : state.quote.automatic; }
   function assets(state) {
-    if (!state.snapshot) return null;
+    if (!state.snapshot && !state.accounts?.some(a=>a.field!==null)) return null;
     const values = project(state).values;
     const price = activeQuote(state)?.price ?? null;
     const stock = values.shares === 0 ? 0 : values.shares === null || price === null ? null : values.shares * price;
@@ -242,9 +383,16 @@
     for (const t of after) { const k = key(t), n = counts.get(k) || 0; if (n) { same++; counts.set(k, n - 1); } else added++; }
     return { same, added, removed: before.length - same };
   }
+  function ledgerChanges(before,after,limit=50) {
+    const remaining=new Map();for(const t of before){const k=transactionKey(t);if(!remaining.has(k))remaining.set(k,[]);remaining.get(k).push(t);}
+    const added=[];for(const t of after){const list=remaining.get(transactionKey(t));if(list?.length)list.pop();else if(added.length<limit)added.push(t);}
+    const removed=[];for(const list of remaining.values())for(const t of list)if(removed.length<limit)removed.push(t);
+    return {added,removed};
+  }
   function reconcile(state, baseline, actual, actualAt) {
     const end = localTime(actualAt), start = localTime(baseline.at), issues = [];
     if (end < start) fail('核对时间不能早于账户基准');
+    if (baseline.balance===null) fail('账户基准余额未知');
     if (!state.ledger) issues.push('尚未导入账本');
     const records = state.ledger?.transactions || [];
     if (records.length && summarize(records).start > start.slice(0, 10)) issues.push('账本未覆盖账户基准日');
@@ -252,7 +400,7 @@
     for (const t of records) {
       if (t.date < start.slice(0, 10) || t.date > end.slice(0, 10) || (t.at && (t.at <= start || t.at > end))) continue;
       try {
-        const moves = accountMovements(t), matching = moves.filter(m => m.account === baseline.account);
+        const moves = accountMovements(t), matching = moves.filter(m => accountMembers(state,baseline).includes(m.account));
         if (!matching.length) continue;
         if (!t.at) fail('缺少具体时间');
         if (t.category.split('/').at(-1).trim() === '股票') fail('股票交易需人工核对');
@@ -264,7 +412,7 @@
     return { expected: issues.length ? null : expected, difference: issues.length ? null : actual - expected, applied, issues };
   }
   function capture(state, snapshot) {
-    const frozen = { ...state, snapshot, tracking: null };
+    const frozen = { ...state, snapshot, tracking: null, accounts: [] };
     const result = assets(frozen);
     return { at: snapshot.asOf || snapshot.savedAt, total: result.total, partial: result.partial, price: activeQuote(state)?.price ?? null, values: { ...snapshot.values } };
   }
@@ -273,7 +421,7 @@
     if (payload?.rc !== 0 || data?.f57 !== '688111' || !Number.isInteger(data.f43) || data.f43 <= 0 || data.f43 > 100000000 || !Number.isInteger(data.f86) || data.f86 < 946684800 || data.f86 * 1000 > now + 300000) fail('行情数据不可用');
     return { price: data.f43, at: new Date(data.f86 * 1000).toISOString() };
   }
-  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime, ledgerDiff, reconcile, capture };
+  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime, ledgerDiff, reconcile, capture, moneyFields, debtFields, purposes, ledgerChanges, accountMembers, accountProjection, migrateAccounts, saveAccount, splitAccount, financial, transactionKey, noteMatches, cashflow, equityScenario };
   root.FinanceCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

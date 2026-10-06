@@ -80,9 +80,9 @@ test('quote conversion validates stock identity, cents and timestamp', () => {
   assert.throws(() => C.parseQuote({ ...payload, data: { ...payload.data, f43: '-' } }));
 });
 test('version 1 backups migrate without losing ledger, snapshot or price', () => {
-  const old = exampleState(); old.version = 1; delete old.tracking; delete old.history; delete old.accounts;
+  const old = exampleState(); old.version = 1; delete old.tracking; delete old.history; delete old.accounts; delete old.notes; delete old.scenario;
   const next = C.validateState(old);
-  assert.equal(next.version, 3); assert.equal(next.tracking, null);
+  assert.equal(next.version, 4); assert.equal(next.tracking, null);
   assert.deepEqual(next.ledger, old.ledger); assert.deepEqual(next.snapshot, old.snapshot);
 });
 function trackingState(rows) {
@@ -136,9 +136,9 @@ test('import preview counts duplicate rows as a multiset and replacements as add
   assert.deepEqual(C.ledgerDiff([a,a], [a,changed]), {same:1,added:1,removed:1});
 });
 test('version 2 migration preserves personal state and initializes new sections', () => {
-  const old=exampleState(); old.version=2; delete old.history; delete old.accounts;
-  const next=C.validateState(old); assert.equal(next.version,3);
-  assert.deepEqual(next.history,[]); assert.deepEqual(next.accounts,[]); assert.deepEqual(next.snapshot,old.snapshot);
+  const old=exampleState(); old.version=2; delete old.history; delete old.accounts; delete old.notes; delete old.scenario;
+  const next=C.validateState(old); assert.equal(next.version,4);
+  assert.deepEqual(next.history,[]); assert.equal(next.accounts.length,6); assert.deepEqual(next.snapshot,old.snapshot);
 });
 test('account reconciliation respects baseline, upper cutoff, debt and two-sided repayment', () => {
   const s=trackingState([
@@ -166,8 +166,64 @@ test('history freezes valuation and validates malformed backups', () => {
   s.history[0].total--; s.history[0].values.cash=-1; assert.throws(()=>C.validateState(s));
 });
 test('account backup rejects duplicate account names and negative balances', () => {
-  const s=exampleState(); const a={account:'虚构银行卡',debt:false,at:'2026-01-01T00:00:00Z',balance:10000};
+  const s=exampleState(); const a={account:'虚构银行卡',debt:false,at:'2026-01-01T00:00:00Z',balance:10000,field:'cash',members:['虚构银行卡']};
   s.accounts=[a]; assert.deepEqual(C.validateState(s).accounts,[a]);
   s.accounts.push(a); assert.throws(()=>C.validateState(s));
   s.accounts=[{...a,balance:-1}]; assert.throws(()=>C.validateState(s));
+});
+
+test('v3 migration converts aggregate balances into authoritative accounts without changing totals',()=>{
+  const old=exampleState();old.version=3;delete old.notes;delete old.scenario;
+  const next=C.validateState(old);assert.equal(next.accounts.length,6);assert.equal(C.assets(next).total,C.assets(old).total);
+  const cash=next.accounts.find(a=>a.field==='cash');
+  const changed=C.saveAccount(next,{...cash,balance:200000});
+  assert.equal(C.assets(changed).total-C.assets(next).total,100000);
+  assert.equal(changed.snapshot.values.cash,100000); // Legacy snapshot is no longer a second source of cash.
+});
+test('complete group splitting preserves total and individual reconciliation updates aggregate',()=>{
+  const s=exampleState();s.accounts=C.migrateAccounts(s);
+  const group=s.accounts.find(a=>a.field==='cash');
+  assert.throws(()=>C.splitAccount(s,group.account,[{account:'虚构账户A',balance:1}],group.at),/合计/);
+  const next=C.splitAccount(s,group.account,[{account:'虚构账户A',balance:60000},{account:'虚构账户B',balance:40000}],group.at);
+  assert.equal(C.assets(next).total,C.assets(s).total);
+  const a=next.accounts.find(a=>a.account==='虚构账户A');const changed=C.saveAccount(next,{...a,balance:65000});
+  assert.equal(C.project(changed).values.cash,105000);
+  assert.throws(()=>C.saveAccount(s,{account:'新现金',field:'cash',debt:false,members:['新现金'],balance:1,at:group.at}),/重复计入/);
+});
+test('canonical account projection handles different timestamps and two-sided debt repayment',()=>{
+  const s=trackingState([
+    ['2025-12-31 10:00:00','收入','工资薪水',1,'人民币','测试银行卡'],
+    ['2026-01-02 09:00:00','转账','转账',50,'人民币','测试银行卡：-50，测试信用卡：+50']
+  ]);
+  s.accounts=[{account:'测试银行卡',field:'cash',debt:false,members:['测试银行卡'],balance:100000,at:s.snapshot.asOf},{account:'测试信用卡',field:'shortDebt',debt:true,members:['测试信用卡'],balance:50000,at:s.snapshot.asOf}];
+  const p=C.project(s);assert.deepEqual(p.issues,[]);assert.equal(p.values.cash,95000);assert.equal(p.values.shortDebt,45000);
+  assert.equal(C.financial(s).total,150000); // Stock 100000 plus cash minus debt; unknown other fields excluded.
+  s.accounts[1].balance=45000;s.accounts[1].at='2026-01-02T04:00:00Z';assert.equal(C.project(s).values.shortDebt,45000);
+  assert.equal(C.project(s).values.cash,95000);
+});
+test('financial scope excludes other household assets and debts but reports unknown financial fields',()=>{
+  const s=exampleState();Object.assign(s.snapshot.values,{otherAssets:1000000,otherDebt:300000});
+  assert.equal(C.financial(s).total,180000);assert.equal(C.assets(s).total,880000);
+  assert.equal(C.financial(s).liquid,80000);
+  assert.ok(Math.abs(C.financial(s).concentration-0.5)<1e-9);
+});
+test('equity scenario requires explicit subscription and tax, excludes unvested from current assets',()=>{
+  const s=exampleState();s.scenario={price:10000,subscription:null,tax:0};assert.equal(C.equityScenario(s),null);
+  s.scenario.subscription=50000;const result=C.equityScenario(s);
+  assert.equal(C.assets(s).total,180000);assert.equal(result.stock,1100000);assert.equal(result.total,1130000);assert.equal(result.liquid,30000);
+});
+test('local annotations survive reimport but edited or duplicate transactions are not uniquely matched',()=>{
+  const s=exampleState(),key=C.transactionKey(s.ledger.transactions[0]);
+  s.notes=[{id:'fictional-note',title:'虚构工资用途',detail:'测试',source:'虚构凭据',status:'confirmed',purpose:'family',keys:[key]}];
+  assert.equal(C.noteMatches(s,s.notes[0])[0].count,1);
+  assert.equal(C.cashflow(s,'2025-01').buckets.family,100000);
+  s.ledger.transactions.push({...s.ledger.transactions[0]});assert.equal(C.noteMatches(s,s.notes[0])[0].count,2);
+  assert.equal(C.cashflow(s,'2025-01').buckets.family,0);
+  s.ledger.transactions=s.ledger.transactions.filter(t=>C.transactionKey(t)!==key);assert.equal(C.noteMatches(s,s.notes[0])[0].count,0);
+  assert.equal(s.notes.length,1);
+});
+
+test('import change preview preserves duplicate multiplicity and includes old/new edited rows',()=>{
+ const row=C.parseRows(sample)[0],changed={...row,account:'虚构账户'};
+ const diff=C.ledgerChanges([row,row],[row,changed]);assert.deepEqual(diff.added,[changed]);assert.deepEqual(diff.removed,[row]);
 });
