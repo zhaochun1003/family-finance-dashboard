@@ -138,23 +138,23 @@
     if (state.quote.manual && document.activeElement !== $('manual-price')) $('manual-price').value = state.quote.manual.price / 100;
     if (!state.quote.manual && document.activeElement !== $('manual-price')) $('manual-price').value = '';
   }
-  let activeView='summary', editingAccount=null, splittingAccount=null;
+  let detailOrigin='summary', activeView='summary', editingAccount=null, splittingAccount=null;
   const purposeLabels={unknown:'用途待核实',consumption:'消费',family:'家庭拨款 / 礼物',investment:'资产取得 / 股权认购',debt:'债务清偿 / 垫款归还',refund:'退款',adjustment:'记账调整'};
   function showView(view) {
-    const changed=activeView!==view;activeView=view;
+    const changed=activeView!==view;if(changed&&['summary','ledger','settings'].includes(activeView)&&!['summary','ledger','settings'].includes(view))detailOrigin=activeView;activeView=view;
     for(const page of document.querySelectorAll('[data-page]')) page.hidden=page.dataset.page!==view;
-    const root=['summary','ledger','settings'].includes(view)?view:'summary';
+    const root=['summary','ledger','settings'].includes(view)?view:detailOrigin;
     for(const button of document.querySelectorAll('[data-view]')) button.setAttribute('aria-pressed',String(button.dataset.view===root));
     $('detail-nav').hidden=['summary','ledger','settings'].includes(view);
     const titles={summary:['资产总览','看看现在的资产，以及需要关注的变化。'],ledger:['我的账本','导入一次，查看收入和资金去向。'],settings:['我的','管理数据、备份和设备。'],accounts:['账户余额','更新实际余额，总览随之更新。'],notes:['核实与事件','保留资金变化的原因和依据。'],equity:['股票与归属','查看持仓估值和归属资金情景。'],history:['资产历史','查看已确认的资产记录。']};
     $('view-title').textContent=titles[view][0];$('view-subtitle').textContent=titles[view][1];
-    $('data-health').hidden=view!=='summary';
+    $('data-health').hidden=view!=='summary';$('clear-data').hidden=view!=='settings';$('back-summary').textContent=detailOrigin==='settings'?'← 返回我的':'← 返回总览';
     if(changed)window.scrollTo({top:0,behavior:'instant'});
   }
   for(const button of document.querySelectorAll('[data-view],[data-open]')) button.addEventListener('click',()=>showView(button.dataset.view||button.dataset.open));
   $('update-data').addEventListener('click',()=>$('update-dialog').showModal());
   $('close-update').addEventListener('click',()=>$('update-dialog').close());
-  $('back-summary').addEventListener('click',()=>showView('summary'));
+  $('back-summary').addEventListener('click',()=>showView(detailOrigin));
   $('update-ledger').addEventListener('click',()=>{$('update-dialog').close();showView('ledger');$('ledger-file').click();});
   $('update-balances').addEventListener('click',()=>{$('update-dialog').close();if(state.snapshot)showView('accounts');else $('edit-assets').click();});
   $('update-restore').addEventListener('click',()=>{$('update-dialog').close();showView('settings');$('backup-file').click();});
@@ -163,7 +163,9 @@
     $('data-health').textContent=!projection ? state.ledger?'账本已导入。点击“更新数据”恢复完整备份或填写余额，即可建立资产总览。':'点击“更新数据”开始：恢复完整备份，或分别导入账本与填写余额。' : projection.issues.length ? `余额推算已暂停，展示各账户基准余额，不能视为同一时点的当前余额。${projection.issues.slice(0,3).join('；')}` : `${f?.partial?'金融项目尚未核全。':'金融账户口径；完整家庭资产仍需核实。'} ${projection.active?'余额按账本推算，需与实际账户核对。':'展示实际余额基准。'} 行情时间与余额时间分别保留。`;
     $('data-health').classList.toggle('error',Boolean(projection?.issues.length));
     const rows=$('account-rows');rows.replaceChildren();
+    const accountQuery=$('account-filter').value.trim().toLowerCase();let visibleAccounts=0;
     for(const a of state.accounts) {
+      if(accountQuery&&!`${a.account} ${C.fields.find(f=>f[0]===a.field)?.[1]||''}`.toLowerCase().includes(accountQuery))continue;visibleAccounts++;
       const p=C.accountProjection(state,a), shown=projection?.issues.length ? a.balance : p.balance;
       const row=element('tr');
       row.append(element('td',a.account),element('td',a.field?C.fields.find(f=>f[0]===a.field)[1]:'未纳入资产'),element('td',shown===null?'未知':money(shown)),element('td',time(a.at)));
@@ -171,11 +173,11 @@
       if(a.field && a.members===null && a.balance!==null){const split=element('button','拆分明细','text-button');split.addEventListener('click',()=>{splittingAccount=a;$('split-meta').textContent=`${a.account} · 当前展示 ${shown===null?'未知':money(shown)+' 元'}；拆分后这些账户直接计入首页。`;$('split-entries').value='';$('split-dialog').showModal();});cell.append(split);}
       row.append(cell);rows.append(row);
     }
-    $('account-empty').hidden=Boolean(state.accounts.length);
+    $('account-empty').hidden=Boolean(state.accounts.length);$('account-filter-result').textContent=accountQuery?`找到 ${visibleAccounts} 个账户`:`共 ${state.accounts.length} 个账户；余额各自保留核对时间`;
     const history=$('history-rows');history.replaceChildren();
     for(const h of [...state.history].sort((a,b)=>b.at.localeCompare(a.at))) {const row=element('tr');for(const v of [time(h.at),money(h.total),h.partial?'已知家庭项目净额':'已填写家庭项目净额',h.price===null?'未知':money(h.price)])row.append(element('td',v));history.append(row);}
     $('history-empty').hidden=Boolean(state.history.length);
-    $('record-history').disabled=!projection || Boolean(projection.issues.length);
+    $('record-history').disabled=!projection || Boolean(projection.issues.length);$('history-action-note').textContent=!projection?'先建立账户余额，才能记录资产历史。':projection.issues.length?'余额推算存在待核对问题，完成核对后可记录。':'记录会保留此时股价；不会随行情刷新改变。';
     const attention=$('attention-list');attention.replaceChildren();
     const items=[];
     if(!state.snapshot)items.push(state.ledger?'账本已准备好，请补充当前余额或恢复完整备份。':'从“更新数据”开始建立你的财务首页。');
@@ -184,7 +186,7 @@
     if(!state.history.length)items.push('资产历史尚无记录，确认当前余额后可记录第一份。');
     for(const n of state.notes){const matches=C.noteMatches(state,n);if(n.status==='pending'||matches.some(m=>m.count!==1))items.push(`${n.title}${matches.some(m=>m.count!==1)?'：关联交易需重核':''}`);}
     if(!items.length)items.push('暂无已标记事项；请定期核对账户余额及备份。');
-    for(const item of items.slice(0,1))attention.append(element('li',item));
+    for(const item of items.slice(0,3))attention.append(element('li',item));
   }
   function renderFlow() {
     const month=$('flow-month').value, flow=C.cashflow(state,month);
@@ -194,12 +196,14 @@
   }
   function renderNotes() {
     const list=$('note-list');list.replaceChildren();
+    const query=$('note-filter').value.trim().toLowerCase(),filter=$('note-status-filter').value;let visibleNotes=0;
     for(const n of state.notes) {
+      if(filter!=='all'&&n.status!==filter)continue;if(query&&!`${n.title} ${n.detail} ${n.source||''}`.toLowerCase().includes(query))continue;visibleNotes++;
       const card=element('article',undefined,'note-card');card.dataset.status=n.status;card.append(element('h3',n.title),element('p',`${n.status==='confirmed'?'结论已确认':'待核对 / 待处理'} · ${n.purpose==='unknown'?'背景 / 未用于收支归类':purposeLabels[n.purpose]}`,'small muted'),element('p',n.detail),element('p','依据：'+(n.source||'未填写'),'small muted'));
       const matches=C.noteMatches(state,n);card.append(element('p',!n.keys.length?'事件背景，未关联具体交易。':`关联 ${n.keys.length} 条；唯一匹配 ${matches.filter(m=>m.count===1).length} 条；${matches.filter(m=>m.count!==1).length} 条缺失或不唯一，需重新核对。`,'small muted'));
       const button=element('button','编辑 / 关联交易','text-button');button.addEventListener('click',()=>openNote(n));card.append(button);list.append(card);
     }
-    $('note-empty').hidden=Boolean(state.notes.length);
+    $('note-empty').hidden=Boolean(state.notes.length);$('note-filter-result').textContent=`显示 ${visibleNotes} / ${state.notes.length} 条 · 待处理 ${state.notes.filter(n=>n.status==='pending').length} 条`;
   }
   function renderEquity() {
     const p=C.project(state), f=C.financial(state), result=C.equityScenario(state);
@@ -247,7 +251,7 @@
     if(!confirm('确认当前展示余额用于记录历史？此操作不改变账户基准，股价按现在冻结。'))return;
     const snapshot={savedAt:new Date().toISOString(),asOf:new Date().toISOString(),values:p.values};commit({...state,history:[...state.history,C.capture(state,snapshot)]},'当前展示值已记录到资产历史。');
   });
-  $('flow-month').value=C.localTime(new Date().toISOString()).slice(0,7);$('flow-month').addEventListener('change',renderFlow);
+  $('flow-month').value=C.localTime(new Date().toISOString()).slice(0,7);$('flow-month').addEventListener('change',renderFlow);for(const [id,step] of [['flow-prev',-1],['flow-next',1]])$(id).addEventListener('click',()=>{const [year,month]=$('flow-month').value.split('-').map(Number);if(!year||!month)return;const date=new Date(Date.UTC(year,month-1+step,1));$('flow-month').value=date.toISOString().slice(0,7);renderFlow();});
   $('scenario-form').addEventListener('submit',e=>{e.preventDefault();try{const scenario=Object.fromEntries(['price','subscription','tax'].map(k=>[k,$('scenario-'+k).value.trim()===''?null:C.cents($('scenario-'+k).value,false)]));commit({...state,scenario},'情景已保存在本浏览器，不改变当前资产。');}catch(e){notify(e.message,true);}});
   let editingNote=null, selectedKeys=new Set();
   function openNote(note) {
@@ -424,6 +428,7 @@
     blocked: () => storageBlocked || importing || recoveryBusy || !!document.querySelector('dialog[open]'),
     apply: next => { applyingCloud = true; try { quoteEpoch++; return commit(next, '已读取云端数据。'); } finally { applyingCloud = false; } }
   });
+  $('account-filter').addEventListener('input',()=>{renderReview();for(const row of $('account-rows').rows)for(let i=0;i<row.cells.length;i++)row.cells[i].dataset.label=['账户','分类','展示余额（元）','基准时间','操作'][i];});$('note-filter').addEventListener('input',renderNotes);$('note-status-filter').addEventListener('change',renderNotes);
   render(); refreshQuote();
   setInterval(refreshQuote, 60000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshQuote(); });
