@@ -141,7 +141,7 @@
   let activeView='summary', editingAccount=null, splittingAccount=null;
   const purposeLabels={unknown:'用途待核实',consumption:'消费',family:'家庭拨款 / 礼物',investment:'资产取得 / 股权认购',debt:'债务清偿 / 垫款归还',refund:'退款',adjustment:'记账调整'};
   function showView(view) {
-    activeView=view;
+    const changed=activeView!==view;activeView=view;
     for(const page of document.querySelectorAll('[data-page]')) page.hidden=page.dataset.page!==view;
     const root=['summary','ledger','settings'].includes(view)?view:'summary';
     for(const button of document.querySelectorAll('[data-view]')) button.setAttribute('aria-pressed',String(button.dataset.view===root));
@@ -149,6 +149,7 @@
     const titles={summary:['资产总览','看看现在的资产，以及需要关注的变化。'],ledger:['我的账本','导入一次，查看收入和资金去向。'],settings:['我的','管理数据、备份和设备。'],accounts:['账户余额','更新实际余额，总览随之更新。'],notes:['核实与事件','保留资金变化的原因和依据。'],equity:['股票与归属','查看持仓估值和归属资金情景。'],history:['资产历史','查看已确认的资产记录。']};
     $('view-title').textContent=titles[view][0];$('view-subtitle').textContent=titles[view][1];
     $('data-health').hidden=view!=='summary';
+    if(changed)window.scrollTo({top:0,behavior:'instant'});
   }
   for(const button of document.querySelectorAll('[data-view],[data-open]')) button.addEventListener('click',()=>showView(button.dataset.view||button.dataset.open));
   $('update-data').addEventListener('click',()=>$('update-dialog').showModal());
@@ -206,7 +207,7 @@
     for(const key of ['price','subscription','tax']) if(document.activeElement!==$('scenario-'+key))$('scenario-'+key).value=state.scenario?.[key]==null?'':state.scenario[key]/100;
     $('scenario-result').textContent=p?.issues.length?'余额推算存在问题，请先核实；情景暂不展示。':!result?'补齐股数、金融余额及情景金额后计算；未知认购款与税款不会按 0 处理。':`全部归属后的情景股票市值 ${money(result.stock)} 元；认购与税款合计 ${money(result.cost)} 元；情景金融净额 ${money(result.total)} 元；现金与理财净额 ${money(result.liquid)} 元${result.liquid<0?'，存在资金缺口':''}。`;
   }
-  function render() { renderLedger();renderAssets();renderQuote();renderReview();renderFlow();renderNotes();renderEquity();showView(activeView); }
+  function render() { renderLedger();renderAssets();renderQuote();renderReview();renderFlow();renderNotes();renderEquity();for(const id of ['account-rows','history-rows']){const body=$(id),labels=[...body.closest('table').querySelectorAll('thead th')].map(th=>th.textContent);for(const row of body.rows)for(let i=0;i<row.cells.length;i++)row.cells[i].dataset.label=labels[i];}showView(activeView); }
   function openAccount(a) {
     editingAccount=a||null;
     const names=$('account-names');names.replaceChildren();for(const name of C.ledgerAccounts(state.ledger?.transactions||[])){const option=element('option');option.value=name;names.append(option);}
