@@ -1,7 +1,7 @@
 /* Pure calculations and validation. Shared by the browser and Node checks. */
 (function (root) {
   'use strict';
-  const VERSION = 2;
+  const VERSION = 3;
   const MAX_RECORDS = 100000;
   const MAX_CENTS = 10000000000000;
   const fields = [
@@ -109,13 +109,14 @@
     }
     return { years: [...years.values()].sort((a, b) => a.year.localeCompare(b.year)), start, end, total, count: transactions.length, excluded };
   }
-  function emptyState() { return { version: VERSION, ledger: null, snapshot: null, quote: { mode: 'auto', manual: null, automatic: null }, tracking: null }; }
+  function emptyState() { return { version: VERSION, ledger: null, snapshot: null, quote: { mode: 'auto', manual: null, automatic: null }, tracking: null, history: [], accounts: [] }; }
   function validLocalTime(value) { return typeof value === 'string' && /^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(value) && validDate(value.slice(0, 10)); }
   function localTime(iso) { return new Date(Date.parse(iso) + 8 * 3600000).toISOString().slice(0, 19); }
   function isTime(value) { return typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test(value) && Number.isFinite(Date.parse(value)); }
   function validateState(raw) {
-    if (raw?.version === 1 && keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote'])) raw = { ...raw, version: VERSION, tracking: null };
-    if (!keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote', 'tracking']) || raw.version !== VERSION) fail('备份格式或版本不受支持');
+    if (raw?.version === 1 && keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote'])) raw = { ...raw, version: 2, tracking: null };
+    if (raw?.version === 2 && keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote', 'tracking'])) raw = { ...raw, version: VERSION, history: [], accounts: [] };
+    if (!keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote', 'tracking', 'history', 'accounts']) || raw.version !== VERSION) fail('备份格式或版本不受支持');
     if (raw.ledger !== null) {
       const l = raw.ledger;
       if (!keysExactly(l, ['importedAt', 'transactions']) || !isTime(l.importedAt) || !Array.isArray(l.transactions) || !l.transactions.length || l.transactions.length > MAX_RECORDS) fail('账本备份无效');
@@ -148,6 +149,18 @@
         if (!keysExactly(m, ['account', 'field']) || typeof m.account !== 'string' || !m.account.trim() || m.account.length > 200 || !['cash', 'wealth', 'provident', 'shortDebt', 'otherAssets', 'otherDebt', 'ignore', 'stock'].includes(m.field) || seen.has(m.account)) fail('账户分类设置无效');
         seen.add(m.account);
       }
+    }
+    if (!Array.isArray(raw.history) || raw.history.length > 500 || !Array.isArray(raw.accounts) || raw.accounts.length > 500) fail('历史或账户格式无效');
+    for (const h of raw.history) {
+      if (!keysExactly(h, ['at', 'total', 'partial', 'price', 'values']) || !isTime(h.at) || !Number.isSafeInteger(h.total) || typeof h.partial !== 'boolean' || (h.price !== null && (!Number.isSafeInteger(h.price) || h.price <= 0 || h.price > 100000000))) fail('历史快照格式无效');
+      const historical = validateState({ ...emptyState(), snapshot: { savedAt: h.at, values: h.values }, quote: { mode: 'auto', manual: null, automatic: h.price === null ? null : { price: h.price, at: h.at } } });
+      const computed = assets(historical);
+      if (computed.total !== h.total || computed.partial !== h.partial) fail('历史净额与余额或股价不一致');
+    }
+    const accountNames = new Set();
+    for (const a of raw.accounts) {
+      if (!keysExactly(a, ['account', 'debt', 'at', 'balance']) || typeof a.account !== 'string' || !a.account.trim() || a.account.length > 200 || accountNames.has(a.account) || typeof a.debt !== 'boolean' || !isTime(a.at) || !Number.isSafeInteger(a.balance) || a.balance < 0 || a.balance > MAX_CENTS) fail('账户余额格式无效');
+      accountNames.add(a.account);
     }
     return JSON.parse(JSON.stringify(raw));
   }
@@ -219,12 +232,48 @@
     if (!Number.isSafeInteger(total) || (stock !== null && !Number.isSafeInteger(stock))) fail('资产合计超出可精确计算范围');
     return { total, stock, items, partial: filled.length !== items.length, any: filled.length > 0, unvested: values.unvested };
   }
+
+  function ledgerDiff(before, after) {
+    // Multisets preserve legitimately identical transactions; no guessed transaction IDs.
+    const key = t => JSON.stringify([t.date, t.at ?? null, t.type, t.category, t.amount, t.currency, t.account ?? null]);
+    const counts = new Map();
+    for (const t of before) { const k = key(t); counts.set(k, (counts.get(k) || 0) + 1); }
+    let same = 0, added = 0;
+    for (const t of after) { const k = key(t), n = counts.get(k) || 0; if (n) { same++; counts.set(k, n - 1); } else added++; }
+    return { same, added, removed: before.length - same };
+  }
+  function reconcile(state, baseline, actual, actualAt) {
+    const end = localTime(actualAt), start = localTime(baseline.at), issues = [];
+    if (end < start) fail('核对时间不能早于账户基准');
+    if (!state.ledger) issues.push('尚未导入账本');
+    const records = state.ledger?.transactions || [];
+    if (records.length && summarize(records).start > start.slice(0, 10)) issues.push('账本未覆盖账户基准日');
+    let expected = baseline.balance, applied = 0;
+    for (const t of records) {
+      if (t.date < start.slice(0, 10) || t.date > end.slice(0, 10) || (t.at && (t.at <= start || t.at > end))) continue;
+      try {
+        const moves = accountMovements(t), matching = moves.filter(m => m.account === baseline.account);
+        if (!matching.length) continue;
+        if (!t.at) fail('缺少具体时间');
+        if (t.category.split('/').at(-1).trim() === '股票') fail('股票交易需人工核对');
+        for (const m of matching) expected += baseline.debt ? -m.delta : m.delta;
+        applied++;
+      } catch (e) { issues.push(`${t.at || t.date}：${e.message}`); }
+    }
+    if (!Number.isSafeInteger(expected) || expected < 0 || expected > MAX_CENTS) issues.push('推算余额异常');
+    return { expected: issues.length ? null : expected, difference: issues.length ? null : actual - expected, applied, issues };
+  }
+  function capture(state, snapshot) {
+    const frozen = { ...state, snapshot, tracking: null };
+    const result = assets(frozen);
+    return { at: snapshot.asOf || snapshot.savedAt, total: result.total, partial: result.partial, price: activeQuote(state)?.price ?? null, values: { ...snapshot.values } };
+  }
   function parseQuote(payload, now = Date.now()) {
     const data = payload?.data;
     if (payload?.rc !== 0 || data?.f57 !== '688111' || !Number.isInteger(data.f43) || data.f43 <= 0 || data.f43 > 100000000 || !Number.isInteger(data.f86) || data.f86 < 946684800 || data.f86 * 1000 > now + 300000) fail('行情数据不可用');
     return { price: data.f43, at: new Date(data.f86 * 1000).toISOString() };
   }
-  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime };
+  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime, ledgerDiff, reconcile, capture };
   root.FinanceCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

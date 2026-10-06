@@ -80,9 +80,9 @@ test('quote conversion validates stock identity, cents and timestamp', () => {
   assert.throws(() => C.parseQuote({ ...payload, data: { ...payload.data, f43: '-' } }));
 });
 test('version 1 backups migrate without losing ledger, snapshot or price', () => {
-  const old = exampleState(); old.version = 1; delete old.tracking;
+  const old = exampleState(); old.version = 1; delete old.tracking; delete old.history; delete old.accounts;
   const next = C.validateState(old);
-  assert.equal(next.version, 2); assert.equal(next.tracking, null);
+  assert.equal(next.version, 3); assert.equal(next.tracking, null);
   assert.deepEqual(next.ledger, old.ledger); assert.deepEqual(next.snapshot, old.snapshot);
 });
 function trackingState(rows) {
@@ -128,4 +128,46 @@ test('account extraction and tracking settings validation', () => {
   assert.deepEqual(new Set(C.ledgerAccounts(state.ledger.transactions)),new Set(['测试银行卡','测试信用卡']));
   state.tracking.mappings.push({...state.tracking.mappings[0]});
   assert.throws(()=>C.validateState(state),/分类/);
+});
+
+test('import preview counts duplicate rows as a multiset and replacements as add/remove', () => {
+  const rows = C.parseRows(sample), a = rows[0], changed = { ...a, amount: a.amount + 1 };
+  assert.deepEqual(C.ledgerDiff([a,a], [a,a]), {same:2,added:0,removed:0});
+  assert.deepEqual(C.ledgerDiff([a,a], [a,changed]), {same:1,added:1,removed:1});
+});
+test('version 2 migration preserves personal state and initializes new sections', () => {
+  const old=exampleState(); old.version=2; delete old.history; delete old.accounts;
+  const next=C.validateState(old); assert.equal(next.version,3);
+  assert.deepEqual(next.history,[]); assert.deepEqual(next.accounts,[]); assert.deepEqual(next.snapshot,old.snapshot);
+});
+test('account reconciliation respects baseline, upper cutoff, debt and two-sided repayment', () => {
+  const s=trackingState([
+    ['2026-01-01 07:00:00','收入','工资薪水',999,'人民币','测试银行卡'],
+    ['2026-01-02 09:00:00','收入','工资薪水',100,'人民币','测试银行卡'],
+    ['2026-01-02 10:00:00','支出','餐饮',20,'人民币','测试信用卡'],
+    ['2026-01-02 11:00:00','转账','转账',50,'人民币','测试银行卡：-50，测试信用卡：+50'],
+    ['2026-01-03 10:00:00','收入','工资薪水',999,'人民币','测试银行卡']
+  ]);
+  const at='2026-01-02T04:00:00.000Z';
+  const cash={account:'测试银行卡',debt:false,at:s.snapshot.asOf,balance:100000};
+  const debt={account:'测试信用卡',debt:true,at:s.snapshot.asOf,balance:50000};
+  assert.equal(C.reconcile(s,cash,105000,at).difference,0);
+  assert.equal(C.reconcile(s,debt,47500,at).difference,500);
+  assert.throws(()=>C.reconcile(s,cash,0,'2025-01-01T00:00:00Z'),/早于/);
+  s.ledger.transactions.push({...s.ledger.transactions[1],at:null});
+  assert.equal(C.reconcile(s,cash,0,at).expected,null);
+});
+test('history freezes valuation and validates malformed backups', () => {
+  const s=exampleState(), entry=C.capture(s,s.snapshot);
+  s.history.push(entry); s.quote.automatic.price=99999;
+  assert.equal(s.history[0].total,180000); assert.equal(s.history[0].price,10000);
+  assert.deepEqual(C.validateState(JSON.parse(JSON.stringify(s))),s);
+  s.history[0].total++; assert.throws(()=>C.validateState(s),/不一致/);
+  s.history[0].total--; s.history[0].values.cash=-1; assert.throws(()=>C.validateState(s));
+});
+test('account backup rejects duplicate account names and negative balances', () => {
+  const s=exampleState(); const a={account:'虚构银行卡',debt:false,at:'2026-01-01T00:00:00Z',balance:10000};
+  s.accounts=[a]; assert.deepEqual(C.validateState(s).accounts,[a]);
+  s.accounts.push(a); assert.throws(()=>C.validateState(s));
+  s.accounts=[{...a,balance:-1}]; assert.throws(()=>C.validateState(s));
 });

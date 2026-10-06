@@ -34,6 +34,33 @@
       return false;
     }
   }
+  // Keep one import recovery point outside localStorage, avoiding duplicate ledger quota.
+  function recovery(mode, value) {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open('family-finance-recovery', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('recovery');
+      request.onerror = () => reject(new Error('无法保存导入恢复点，请检查浏览器存储权限'));
+      request.onsuccess = () => {
+        const db = request.result, tx = db.transaction('recovery', mode === 'read' ? 'readonly' : 'readwrite');
+        const store = tx.objectStore('recovery');
+        const action = mode === 'read' ? store.get('ledger') : mode === 'clear' ? store.delete('ledger') : store.put(value, 'ledger');
+        tx.oncomplete = () => { resolve(action.result); db.close(); };
+        tx.onabort = tx.onerror = () => { reject(new Error('恢复点保存失败')); db.close(); };
+      };
+    });
+  }
+  let recoveryBusy = false;
+  recovery('read').then(value => { $('undo-import').hidden = value === undefined; }).catch(() => {});
+  $('undo-import').addEventListener('click', async () => {
+    if (importing || recoveryBusy || !confirm('恢复最近一次导入之前的账本？当前资产基准、账户基准和历史记录保留，推算余额将重新计算。')) return;
+    recoveryBusy = true;
+    try {
+      const ledger = await recovery('read');
+      if (ledger === undefined) throw new Error('没有可用的恢复点');
+      if (commit({ ...state, ledger }, '账本已恢复，资产按当前基准重新推算。')) { await recovery('clear'); $('undo-import').hidden = true; }
+    } catch (e) { notify(e.message, true); }
+    finally { recoveryBusy = false; }
+  });
   function element(tag, text, className) {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;
@@ -110,7 +137,69 @@
     if (state.quote.manual && document.activeElement !== $('manual-price')) $('manual-price').value = state.quote.manual.price / 100;
     if (!state.quote.manual && document.activeElement !== $('manual-price')) $('manual-price').value = '';
   }
-  function render() { renderLedger(); renderAssets(); renderQuote(); }
+  function renderReview() {
+    const projection = C.project(state), result = C.assets(state);
+    $('data-health').textContent = !state.snapshot ? '下一步：确认实际余额并填写资产快照。挖财交易文件不包含当前账户余额。' : projection?.issues.length ? `余额推算已暂停：当前展示基准余额，股价仍按采用价格估值。请核对：${projection.issues.join('；')}` : `${result.partial ? '部分资产未知，展示已填项目净额。' : '资产项目已填写。'}${projection?.active ? ' 余额来自账本推算，尚需与实际账户核对。' : ' 余额来自已填写基准。'} 股票按采用价格估值。`;
+    $('data-health').classList.toggle('error', Boolean(projection?.issues.length));
+    const rows = $('account-rows'); rows.replaceChildren();
+    for (const a of state.accounts) {
+      const row = element('tr'); row.append(element('td', a.account + (a.debt ? ' · 负债' : '')), element('td', money(a.balance)), element('td', time(a.at)));
+      const cell = element('td'), button = element('button', '核对', 'text-button'); button.type = 'button'; button.addEventListener('click', () => openAccount(a)); cell.append(button); row.append(cell); rows.append(row);
+    }
+    $('account-empty').hidden = Boolean(state.accounts.length);
+    const history = $('history-rows'); history.replaceChildren();
+    for (const h of [...state.history].sort((a,b) => b.at.localeCompare(a.at))) {
+      const row = element('tr');
+      for (const v of [time(h.at), money(h.total), h.partial ? '已填项目净额' : '全部已填项目净资产', h.price === null ? '未知' : money(h.price)]) row.append(element('td', v));
+      history.append(row);
+    }
+    $('history-empty').hidden = Boolean(state.history.length);
+    $('record-history').disabled = !state.snapshot || Boolean(projection?.issues.length);
+  }
+  function render() { renderLedger(); renderAssets(); renderQuote(); renderReview(); }
+  function openAccount(a) {
+    const names = $('account-names'); names.replaceChildren();
+    for (const name of C.ledgerAccounts(state.ledger?.transactions || [])) { const option = element('option'); option.value = name; names.append(option); }
+    $('account-name').value = a?.account || ''; $('account-debt').checked = a?.debt || false;
+    $('account-balance').value = ''; $('account-at').value = C.localTime(new Date().toISOString()); $('account-result').hidden = true;
+    $('account-dialog').showModal();
+  }
+  function accountInput() {
+    if (!$('account-form').reportValidity()) return null;
+    const account = $('account-name').value.trim(); if (!account) throw new Error('请输入账户名称');
+    return { account, debt: $('account-debt').checked, balance: C.cents($('account-balance').value, false), at: new Date($('account-at').value + '+08:00').toISOString() };
+  }
+  $('edit-account').addEventListener('click', () => openAccount());
+  $('close-account').addEventListener('click', () => $('account-dialog').close());
+  $('account-form').addEventListener('submit', e => {
+    e.preventDefault();
+    try {
+      const actual = accountInput(); if (!actual) return;
+      const baseline = state.accounts.find(a => a.account === actual.account);
+      let text;
+      if (!baseline) text = '尚无该账户基准，请确认实际余额后建立基准。';
+      else if (baseline.debt !== actual.debt) throw new Error('账户资产 / 负债口径与原基准不同，请先核实后再建立新基准');
+      else {
+        const r = C.reconcile(state, baseline, actual.balance, actual.at);
+        text = r.issues.length ? `无法可靠推算：${r.issues.join('；')}` : `推算余额 ${money(r.expected)} 元；实际余额 ${money(actual.balance)} 元；差额（实际 − 推算）${money(r.difference)} 元。${r.difference === 0 ? '本次金额一致；仍需确认账本无漏记。' : '请核对漏记、方向、付款账户及未入账交易。'} 基准后计入 ${r.applied} 笔。`;
+      }
+      $('account-result').textContent = text; $('account-result').hidden = false;
+    } catch (e) { notify(e.message, true); }
+  });
+  $('save-account').addEventListener('click', () => {
+    try {
+      const a = accountInput(); if (!a) return;
+      if (!confirm('确认此余额和时间来自实际账户？将替换该账户基准，差额不会被记成消费或收入，资产快照需另行更新。')) return;
+      const accounts = [...state.accounts.filter(x => x.account !== a.account), a];
+      if (commit({ ...state, accounts }, '账户实际余额基准已保存；资产快照未改变。')) $('account-dialog').close();
+    } catch (e) { notify(e.message, true); }
+  });
+  $('record-history').addEventListener('click', () => {
+    if (!state.snapshot || C.project(state).issues.length) return;
+    if (!confirm('确认当前展示的余额用于记录历史？股价与未知项目按当前状态保留；此操作不重设自动调整基准。')) return;
+    const snapshot = { savedAt: new Date().toISOString(), asOf: new Date().toISOString(), values: C.project(state).values };
+    commit({ ...state, history: [...state.history, C.capture(state, snapshot)] }, '当前展示值已记录到资产历史。');
+  });
   async function refreshQuote() {
     if (loading || document.hidden) return;
     loading = true; renderQuote();
@@ -131,7 +220,7 @@
   }
   let importing = false;
   async function importLedger(file) {
-    if (!file || importing) return;
+    if (!file || importing || recoveryBusy) return;
     if (!/\.xlsx$/i.test(file.name)) return notify('请选择挖财导出的 .xlsx 文件。', true);
     if (file.size > 30 * 1024 * 1024) return notify('文件超过 30 MB，请缩小导出范围。', true);
     importing = true; $('ledger-file').disabled = true; notify('正在本机解析账本…');
@@ -142,9 +231,28 @@
       const workbook = XLSX.read(buffer, { type: 'array', cellDates: false });
       const transactions = C.parseWorkbook(workbook, XLSX);
       const next = { ...state, ledger: { importedAt: new Date().toISOString(), transactions } };
-      if (state.ledger && !confirm(`导入 ${transactions.length.toLocaleString('zh-CN')} 笔记录并替换当前账本？启用自动调整时，将从余额基准重新推算变化。`)) { notify('已取消导入，原数据保留。'); return; }
-      const projection = C.project(next);
-      commit(next, `已导入 ${transactions.length.toLocaleString('zh-CN')} 笔记录，文件未上传。${projection?.active ? projection.issues.length ? '余额自动调整暂停，请查看当前快照的核对提示。' : `余额已按基准之后 ${projection.applied} 笔记录调整。` : ''}`);
+      const diff = C.ledgerDiff(state.ledger?.transactions || [], transactions), summary = C.summarize(transactions);
+      const projection = C.project(next), before = C.assets(state), after = C.assets(next);
+      $('import-summary').textContent = `${summary.count.toLocaleString('zh-CN')} 笔 · ${summary.start} 至 ${summary.end}。相同 ${diff.same} 笔，加入 ${diff.added} 笔，移除 ${diff.removed} 笔。`;
+      $('import-impact').textContent = projection?.issues.length ? `自动推算将暂停，显示基准余额：${projection.issues.join('；')}` : after && before ? `展示净额由 ${money(before.total)} 元变为 ${money(after.total)} 元（${after.partial ? '含未知项目，非完整净资产' : '按当前股价'}）。` : '导入账本不会自动建立当前资产余额。';
+      const signature = () => JSON.stringify([state.ledger, state.snapshot, state.tracking, state.accounts, state.history]);
+      const previewSignature = signature();
+      const accepted = await new Promise(resolve => {
+        const dialog = $('import-dialog'); let accepted = false;
+        const onConfirm = () => { accepted = true; dialog.close(); }, onCancel = () => dialog.close();
+        $('confirm-import').addEventListener('click', onConfirm); $('cancel-import').addEventListener('click', onCancel);
+        dialog.addEventListener('close', () => { $('confirm-import').removeEventListener('click', onConfirm); $('cancel-import').removeEventListener('click', onCancel); resolve(accepted); }, { once: true });
+        dialog.showModal();
+      });
+      if (!accepted) { notify('已取消导入，原数据保留。'); return; }
+      // Do not overwrite changes made while the preview was open (including another tab).
+      if (signature() !== previewSignature) throw new Error('预览期间数据已变化，请重新导入');
+      const previousRecovery = await recovery('read');
+      await recovery('write', state.ledger);
+      if (signature() !== previewSignature) { await recovery(previousRecovery === undefined ? 'clear' : 'write', previousRecovery); throw new Error('保存期间数据已变化，请重新导入'); }
+      const saved = commit({ ...state, ledger: next.ledger }, `已导入 ${transactions.length.toLocaleString('zh-CN')} 笔记录，文件未上传。${projection?.active ? projection.issues.length ? '余额自动调整暂停，请查看当前快照的核对提示。' : `余额已按基准之后 ${projection.applied} 笔记录调整。` : ''}`);
+      if (!saved) await recovery(previousRecovery === undefined ? 'clear' : 'write', previousRecovery);
+      $('undo-import').hidden = !saved && previousRecovery === undefined;
     } catch (error) { notify(`导入失败：${error.message} 原数据保留。`, true); }
     finally { importing = false; $('ledger-file').disabled = false; $('ledger-file').value = ''; }
   }
@@ -173,7 +281,7 @@
       for (const [key, , unit] of C.fields) { const raw = $(`asset-${key}`).value.trim(); values[key] = raw === '' ? null : unit === '股' ? Number(raw) : C.cents(raw, false); }
       const asOf = new Date($('asset-asof').value + '+08:00').toISOString();
       const snapshot = { savedAt: new Date().toISOString(), asOf, values };
-      if (commit({ ...state, snapshot }, '资产快照已保存。')) $('asset-dialog').close();
+      if (commit({ ...state, snapshot, history: [...state.history, C.capture(state, snapshot)] }, '资产快照已保存并记录历史。')) $('asset-dialog').close();
     } catch (error) { notify(error.message, true); }
   });
   $('price-form').addEventListener('submit', e => {
@@ -222,19 +330,21 @@
     notify(storageBlocked ? '已生成原始存储副本，请保存文件。内容可能损坏，请保留副本后恢复有效备份。' : '已生成备份，请在浏览器中保存文件；其中包含个人数据，请妥善保管。');
   });
   $('backup-file').addEventListener('change', async e => {
+    if (importing || recoveryBusy) { e.target.value = ''; return notify('请先完成或取消当前导入。', true); }
     const file = e.target.files[0]; if (!file) return;
     try {
       if (file.size > 25 * 1024 * 1024) throw new Error('备份超过 25 MB');
       const next = C.validateState(JSON.parse(await file.text())); C.assets(next);
       if (!confirm('此备份将覆盖当前浏览器的账本、资产快照和股价设置。建议先导出当前备份。确定恢复？')) return;
       quoteEpoch++; quoteStatus = '已恢复备份中的价格；等待刷新';
-      commit(next, '备份已恢复到当前浏览器。', true); refreshQuote();
+      if (commit(next, '备份已恢复到当前浏览器。', true)) { await recovery('clear'); $('undo-import').hidden = true; } refreshQuote();
     } catch (error) { notify(`恢复失败：${error.message}。原数据保留。`, true); }
     finally { e.target.value = ''; }
   });
-  $('clear-data').addEventListener('click', () => {
+  $('clear-data').addEventListener('click', async () => {
+    if (importing || recoveryBusy) return notify('请先完成或取消当前导入。', true);
     if (!confirm('删除此浏览器保存的所有账本、资产和股价设置？请先导出备份。')) return;
-    try { localStorage.removeItem(STORAGE_KEY); quoteEpoch++; state = C.emptyState(); storageBlocked = false; originalStored = null; quoteStatus = '已清空；点击刷新获取行情'; render(); notify('本地数据已清空。'); }
+    try { await recovery('clear'); $('undo-import').hidden = true; localStorage.removeItem(STORAGE_KEY); quoteEpoch++; state = C.emptyState(); storageBlocked = false; originalStored = null; quoteStatus = '已清空；点击刷新获取行情'; render(); notify('本地数据已清空。'); }
     catch { notify('浏览器未允许清空存储，请检查浏览器设置。', true); }
   });
   window.addEventListener('storage', e => {
