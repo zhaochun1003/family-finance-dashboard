@@ -141,12 +141,23 @@
   function showView(view) {
     activeView=view;
     for(const page of document.querySelectorAll('[data-page]')) page.hidden=page.dataset.page!==view;
-    for(const button of document.querySelectorAll('[data-view]')) button.setAttribute('aria-pressed',String(button.dataset.view===view));
+    const root=['summary','ledger','settings'].includes(view)?view:'summary';
+    for(const button of document.querySelectorAll('[data-view]')) button.setAttribute('aria-pressed',String(button.dataset.view===root));
+    $('detail-nav').hidden=['summary','ledger','settings'].includes(view);
+    const titles={summary:['资产总览','看看现在的资产，以及需要关注的变化。'],ledger:['我的账本','导入一次，查看收入和资金去向。'],settings:['我的','管理数据、备份和设备。'],accounts:['账户余额','更新实际余额，总览随之更新。'],notes:['核实与事件','保留资金变化的原因和依据。'],equity:['股票与归属','查看持仓估值和归属资金情景。'],history:['资产历史','查看已确认的资产记录。']};
+    $('view-title').textContent=titles[view][0];$('view-subtitle').textContent=titles[view][1];
+    $('data-health').hidden=view!=='summary';
   }
   for(const button of document.querySelectorAll('[data-view],[data-open]')) button.addEventListener('click',()=>showView(button.dataset.view||button.dataset.open));
+  $('update-data').addEventListener('click',()=>$('update-dialog').showModal());
+  $('close-update').addEventListener('click',()=>$('update-dialog').close());
+  $('back-summary').addEventListener('click',()=>showView('summary'));
+  $('update-ledger').addEventListener('click',()=>{$('update-dialog').close();showView('ledger');$('ledger-file').click();});
+  $('update-balances').addEventListener('click',()=>{$('update-dialog').close();if(state.snapshot)showView('accounts');else $('edit-assets').click();});
+  $('update-restore').addEventListener('click',()=>{$('update-dialog').close();showView('settings');$('backup-file').click();});
   function renderReview() {
     const projection=C.project(state), f=C.financial(state);
-    $('data-health').textContent=!projection ? '先导入账本，再建立实际余额。交易文件不能推导初始余额。' : projection.issues.length ? `余额推算已暂停，展示各账户基准余额，不能视为同一时点的当前余额。${projection.issues.slice(0,3).join('；')}` : `${f?.partial?'金融项目尚未核全。':'金融账户口径；完整家庭资产仍需核实。'} ${projection.active?'余额按账本推算，需与实际账户核对。':'展示实际余额基准。'} 行情时间与余额时间分别保留。`;
+    $('data-health').textContent=!projection ? state.ledger?'账本已导入。点击“更新数据”恢复完整备份或填写余额，即可建立资产总览。':'点击“更新数据”开始：恢复完整备份，或分别导入账本与填写余额。' : projection.issues.length ? `余额推算已暂停，展示各账户基准余额，不能视为同一时点的当前余额。${projection.issues.slice(0,3).join('；')}` : `${f?.partial?'金融项目尚未核全。':'金融账户口径；完整家庭资产仍需核实。'} ${projection.active?'余额按账本推算，需与实际账户核对。':'展示实际余额基准。'} 行情时间与余额时间分别保留。`;
     $('data-health').classList.toggle('error',Boolean(projection?.issues.length));
     const rows=$('account-rows');rows.replaceChildren();
     for(const a of state.accounts) {
@@ -164,12 +175,13 @@
     $('record-history').disabled=!projection || Boolean(projection.issues.length);
     const attention=$('attention-list');attention.replaceChildren();
     const items=[];
+    if(!state.snapshot)items.push(state.ledger?'账本已准备好，请补充当前余额或恢复完整备份。':'从“更新数据”开始建立你的财务首页。');
     if(projection?.issues.length)items.push(...projection.issues.slice(0,3));
     if(state.accounts.some(a=>a.field && a.members===null && a.balance!==null))items.push('部分余额仍为分类汇总，可用完整明细拆分；不要重复添加已包含的账户。');
     if(!state.history.length)items.push('资产历史尚无记录，确认当前余额后可记录第一份。');
     for(const n of state.notes){const matches=C.noteMatches(state,n);if(n.status==='pending'||matches.some(m=>m.count!==1))items.push(`${n.title}${matches.some(m=>m.count!==1)?'：关联交易需重核':''}`);}
     if(!items.length)items.push('暂无已标记事项；请定期核对账户余额及备份。');
-    for(const item of items.slice(0,6))attention.append(element('li',item));
+    for(const item of items.slice(0,1))attention.append(element('li',item));
   }
   function renderFlow() {
     const month=$('flow-month').value, flow=C.cashflow(state,month);
