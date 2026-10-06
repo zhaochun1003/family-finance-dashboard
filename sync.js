@@ -65,7 +65,9 @@
         if(!enabled)return;
         let localBase=await hash(canonical(adapter.get()));
         if(meta&&meta.base!==null&&head.revision===meta.revision){
-          if(localBase!==meta.base){status('正在同步…');await upload(head.revision);}return;
+          if(localBase!==meta.base){status('正在同步…');await upload(head.revision);}
+          else status(head.revision?'已同步 · 自动同步已开启':'云端为空，更新数据后会自动同步。');
+          return;
         }
         const row=await remote();
         if(!enabled)return;
