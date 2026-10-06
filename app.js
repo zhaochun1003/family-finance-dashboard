@@ -3,7 +3,7 @@
   const C = window.FinanceCore;
   const STORAGE_KEY = 'family-finance-dashboard.v1';
   const $ = id => document.getElementById(id);
-  const money = cents => (cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = cents => ((cents || 0) / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const headline = cents => Math.abs(cents) >= 10000000 ? (cents / 1000000).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' 万' : money(cents);
   const time = iso => new Date(iso).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
   let state = C.emptyState(), quoteStatus = '正在获取公开行情…', loading = false;
@@ -86,7 +86,9 @@
     $('stock-value').textContent = result?.stock != null ? headline(result.stock) : '—';
     const quote = C.activeQuote(state);
     $('stock-note').textContent = state.snapshot?.values.shares != null ? `${state.snapshot.values.shares.toLocaleString('zh-CN')} 股${quote ? ` · 采用${state.quote.mode === 'manual' ? '手动' : '自动'}价格` : ' · 缺少股价'}` : '持股数量 × 当前采用价格';
-    $('snapshot-date').textContent = state.snapshot ? `余额保存于 ${time(state.snapshot.savedAt)}` : '尚未保存快照';
+    const projection = C.project(state);
+    $('snapshot-date').textContent = state.snapshot ? `余额基准：${time(state.snapshot.asOf || state.snapshot.savedAt)}` : '尚未保存快照';
+    $('tracking-status').textContent = !projection?.active ? '账本自动调整未启用。' : projection.issues.length ? `自动调整暂停，显示基准余额：\n${projection.issues.slice(0, 3).join('\n')}${projection.issues.length > 3 ? '\n更多记录也需核对。' : ''}` : `账本自动调整已启用 · 基准之后 ${projection.applied} 笔${projection.through ? ` · 推算至 ${projection.through.replace('T', ' ')}` : ' · 尚无新增记录'}`;
     if (result) {
       const colors = { cash: '#68b7cf', wealth: '#2d88ca', provident: '#6a88b5', shares: '#174574', otherAssets: '#87a9be' };
       const positive = result.items.reduce((sum, [, value]) => sum + Math.max(0, value ?? 0), 0);
@@ -140,8 +142,9 @@
       const workbook = XLSX.read(buffer, { type: 'array', cellDates: false });
       const transactions = C.parseWorkbook(workbook, XLSX);
       const next = { ...state, ledger: { importedAt: new Date().toISOString(), transactions } };
-      if (state.ledger && !confirm(`导入 ${transactions.length.toLocaleString('zh-CN')} 笔记录并替换当前账本？资产快照保持不变。`)) { notify('已取消导入，原数据保留。'); return; }
-      commit(next, `已导入 ${transactions.length.toLocaleString('zh-CN')} 笔记录，文件未上传。`);
+      if (state.ledger && !confirm(`导入 ${transactions.length.toLocaleString('zh-CN')} 笔记录并替换当前账本？启用自动调整时，将从余额基准重新推算变化。`)) { notify('已取消导入，原数据保留。'); return; }
+      const projection = C.project(next);
+      commit(next, `已导入 ${transactions.length.toLocaleString('zh-CN')} 笔记录，文件未上传。${projection?.active ? projection.issues.length ? '余额自动调整暂停，请查看当前快照的核对提示。' : `余额已按基准之后 ${projection.applied} 笔记录调整。` : ''}`);
     } catch (error) { notify(`导入失败：${error.message} 原数据保留。`, true); }
     finally { importing = false; $('ledger-file').disabled = false; $('ledger-file').value = ''; }
   }
@@ -156,7 +159,9 @@
     wrapper.append(input); $('asset-fields').append(wrapper);
   }
   $('edit-assets').addEventListener('click', () => {
-    for (const [key, , unit] of C.fields) { const value = state.snapshot?.values[key]; $(`asset-${key}`).value = value == null ? '' : unit === '股' ? value : value / 100; }
+    const values = C.project(state)?.values;
+    for (const [key, , unit] of C.fields) { const value = values?.[key]; $(`asset-${key}`).value = value == null ? '' : unit === '股' ? value : value / 100; }
+    $('asset-asof').value = C.localTime(new Date().toISOString());
     $('asset-dialog').showModal();
   });
   $('close-assets').addEventListener('click', () => $('asset-dialog').close());
@@ -166,7 +171,8 @@
     try {
       const values = {};
       for (const [key, , unit] of C.fields) { const raw = $(`asset-${key}`).value.trim(); values[key] = raw === '' ? null : unit === '股' ? Number(raw) : C.cents(raw, false); }
-      const snapshot = { savedAt: new Date().toISOString(), values };
+      const asOf = new Date($('asset-asof').value + '+08:00').toISOString();
+      const snapshot = { savedAt: new Date().toISOString(), asOf, values };
       if (commit({ ...state, snapshot }, '资产快照已保存。')) $('asset-dialog').close();
     } catch (error) { notify(error.message, true); }
   });
@@ -177,6 +183,37 @@
   });
   $('auto-price').addEventListener('click', () => { commit({ ...state, quote: { ...state.quote, mode: 'auto' } }, '已恢复采用自动行情。'); refreshQuote(); });
   $('refresh-quote').addEventListener('click', refreshQuote);
+  const mappingOptions = [['', '需确认'], ['cash', '现金 / 活期'], ['wealth', '理财'], ['provident', '公积金'], ['shortDebt', '短期负债'], ['otherAssets', '其他资产'], ['otherDebt', '其他负债'], ['stock', '股票（需核对股数）'], ['ignore', '排除于此快照']];
+  function suggestField(account) {
+    if (/公积金/.test(account)) return 'provident';
+    if (/信用卡|花呗|白条|月付/.test(account)) return 'shortDebt';
+    if (/理财/.test(account)) return 'wealth';
+    if (/股票|证券|金山/.test(account)) return 'stock';
+    if (/银行|储蓄|现金|零钱|余额宝|支付宝|借记/.test(account)) return 'cash';
+    return '';
+  }
+  $('edit-tracking').addEventListener('click', () => {
+    if (!state.snapshot) return notify('请先填写并保存资产余额及对应时间。', true);
+    const accounts = C.ledgerAccounts(state.ledger?.transactions || []);
+    if (!accounts.length) return notify('账本缺少账户信息，请重新导入挖财 .xlsx 后设置自动调整。', true);
+    const existing = new Map((state.tracking?.mappings || []).map(m => [m.account, m.field]));
+    const list = $('tracking-fields'); list.replaceChildren();
+    for (const account of [...new Set([...accounts, ...existing.keys()])]) {
+      const label = element('label', account), select = element('select');
+      select.dataset.account = account;
+      for (const [value, name] of mappingOptions) { const option = element('option', name); option.value = value; select.append(option); }
+      select.value = existing.get(account) || suggestField(account); label.append(select); list.append(label);
+    }
+    $('tracking-enabled').checked = Boolean(state.tracking?.enabled);
+    $('tracking-dialog').showModal();
+  });
+  $('close-tracking').addEventListener('click', () => $('tracking-dialog').close());
+  $('tracking-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const mappings = [...$('tracking-fields').querySelectorAll('select')].filter(s => s.value).map(s => ({ account: s.dataset.account, field: s.value }));
+    const tracking = { enabled: $('tracking-enabled').checked, mappings };
+    if (commit({ ...state, tracking }, '账户分类已保存。之后导入账本时会按余额基准推算；不明确的记录会暂停调整。')) $('tracking-dialog').close();
+  });
   $('export-backup').addEventListener('click', () => {
     if (storageBlocked && !originalStored) return notify('浏览器阻止读取本地存储，无法导出原始副本。请检查浏览器设置。', true);
     const blob = new Blob([storageBlocked && originalStored ? originalStored : JSON.stringify(state)], { type: 'application/json' });

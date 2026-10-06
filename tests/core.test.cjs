@@ -79,3 +79,53 @@ test('quote conversion validates stock identity, cents and timestamp', () => {
   assert.throws(() => C.parseQuote({ ...payload, data: { ...payload.data, f57: 'wrong' } }));
   assert.throws(() => C.parseQuote({ ...payload, data: { ...payload.data, f43: '-' } }));
 });
+test('version 1 backups migrate without losing ledger, snapshot or price', () => {
+  const old = exampleState(); old.version = 1; delete old.tracking;
+  const next = C.validateState(old);
+  assert.equal(next.version, 2); assert.equal(next.tracking, null);
+  assert.deepEqual(next.ledger, old.ledger); assert.deepEqual(next.snapshot, old.snapshot);
+});
+function trackingState(rows) {
+  const state = exampleState();
+  state.snapshot.asOf = '2026-01-01T00:00:00.000Z';
+  state.snapshot.values.cash = 100000; state.snapshot.values.shortDebt = 50000;
+  state.tracking = { enabled: true, mappings: [{account:'测试银行卡',field:'cash'},{account:'测试信用卡',field:'shortDebt'},{account:'测试理财',field:'wealth'},{account:'测试股票',field:'stock'}] };
+  state.ledger.transactions = C.parseRows([['日期时间','类型','类别','金额','币种','收付账户'], ...rows]);
+  return state;
+}
+test('projection applies salary, card spending, repayment, refund and asset transfer once', () => {
+  const state = trackingState([
+    ['2026-01-01 07:59:59','收入','工资薪水',900,'人民币','测试银行卡'],
+    ['2026-01-02 09:00:00','收入','工资薪水',100,'人民币','测试银行卡'],
+    ['2026-01-02 10:00:00','支出','餐饮',20,'人民币','测试信用卡'],
+    ['2026-01-02 11:00:00','转账','转账',50,'人民币','测试银行卡：-50.0，测试信用卡：+50.0'],
+    ['2026-01-02 12:00:00','收入','退款返款',5,'人民币','测试信用卡'],
+    ['2026-01-02 13:00:00','转账','转账',10,'人民币','测试银行卡：-10，测试理财：+10']
+  ]);
+  const p = C.project(state);
+  assert.deepEqual(p.issues, []); assert.equal(p.applied, 5);
+  assert.equal(p.values.cash,104000); assert.equal(p.values.shortDebt,46500); assert.equal(p.values.wealth,1000);
+  assert.deepEqual(C.project(state).values,p.values); // Re-import starts from baseline, not prior projection.
+  assert.equal(state.snapshot.values.cash,100000); // Baseline is immutable.
+  state.ledger.transactions[1].amount=20000;
+  assert.equal(C.project(state).values.cash,114000); // Corrected records replace previous effect.
+});
+test('projection pauses all balance changes for unknown accounts, shares, unbalanced transfers or loans', () => {
+  for (const row of [
+    ['2026-01-02 09:00:00','收入','工资薪水',100,'人民币','未分类账户'],
+    ['2026-01-02 09:00:00','支出','投资',100,'人民币','测试股票'],
+    ['2026-01-02 09:00:00','收入','股票',100,'人民币','测试银行卡'],
+    ['2026-01-02 09:00:00','转账','转账',50,'人民币','测试银行卡：-50，测试信用卡：+40'],
+    ['2026-01-02 09:00:00','借贷','借款',100,'人民币','测试银行卡'],
+    ['2026-01-01','收入','工资薪水',100,'人民币','测试银行卡']
+  ]) {
+    const state=trackingState([['2025-12-31 10:00:00','收入','工资薪水',1,'人民币','测试银行卡'],row]);
+    assert.ok(C.project(state).issues.length); assert.deepEqual(C.project(state).values,state.snapshot.values);
+  }
+});
+test('account extraction and tracking settings validation', () => {
+  const state=trackingState([['2026-01-01 07:00:00','转账','转账',1,'人民币','测试银行卡：-1，测试信用卡：+1']]);
+  assert.deepEqual(new Set(C.ledgerAccounts(state.ledger.transactions)),new Set(['测试银行卡','测试信用卡']));
+  state.tracking.mappings.push({...state.tracking.mappings[0]});
+  assert.throws(()=>C.validateState(state),/分类/);
+});

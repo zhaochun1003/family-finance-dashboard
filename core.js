@@ -1,7 +1,7 @@
 /* Pure calculations and validation. Shared by the browser and Node checks. */
 (function (root) {
   'use strict';
-  const VERSION = 1;
+  const VERSION = 2;
   const MAX_RECORDS = 100000;
   const MAX_CENTS = 10000000000000;
   const fields = [
@@ -60,7 +60,14 @@
         if (!types.has(type)) fail(`未知交易类型“${type || '空值'}”`);
         if (!currencies.has(currency)) fail(`暂不支持币种“${currency || '空值'}”，不能直接折算成人民币`);
         if (!category || category.length > 200) fail('类别为空或过长');
-        transactions.push({ date: dateOnly(row[index['日期时间']], date1904), type, category, amount: cents(row[index['金额']]), currency: 'CNY' });
+        const date = dateOnly(row[index['日期时间']], date1904);
+        const timeMatch = String(row[index['日期时间']] ?? '').trim().match(/[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+        const at = timeMatch ? `${date}T${timeMatch[1].padStart(2, '0')}:${timeMatch[2]}:${timeMatch[3] || '00'}` : null;
+        if (at && !validLocalTime(at)) fail('交易时间无效');
+        const accountIndex = headers.indexOf('收付账户');
+        const account = accountIndex >= 0 ? String(row[accountIndex] ?? '').trim() : null;
+        if (account !== null && account.length > 1000) fail('账户名称过长');
+        transactions.push({ date, type, category, amount: cents(row[index['金额']]), currency: 'CNY', at, account });
         if (transactions.length > MAX_RECORDS) fail('交易笔数超过 100,000 笔');
       } catch (error) { fail(`第 ${i + 1} 行：${error.message}。本次未导入，原数据保留。`); }
     }
@@ -102,21 +109,25 @@
     }
     return { years: [...years.values()].sort((a, b) => a.year.localeCompare(b.year)), start, end, total, count: transactions.length, excluded };
   }
-  function emptyState() { return { version: VERSION, ledger: null, snapshot: null, quote: { mode: 'auto', manual: null, automatic: null } }; }
+  function emptyState() { return { version: VERSION, ledger: null, snapshot: null, quote: { mode: 'auto', manual: null, automatic: null }, tracking: null }; }
+  function validLocalTime(value) { return typeof value === 'string' && /^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(value) && validDate(value.slice(0, 10)); }
+  function localTime(iso) { return new Date(Date.parse(iso) + 8 * 3600000).toISOString().slice(0, 19); }
   function isTime(value) { return typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test(value) && Number.isFinite(Date.parse(value)); }
   function validateState(raw) {
-    if (!keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote']) || raw.version !== VERSION) fail('备份格式或版本不受支持');
+    if (raw?.version === 1 && keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote'])) raw = { ...raw, version: VERSION, tracking: null };
+    if (!keysExactly(raw, ['version', 'ledger', 'snapshot', 'quote', 'tracking']) || raw.version !== VERSION) fail('备份格式或版本不受支持');
     if (raw.ledger !== null) {
       const l = raw.ledger;
       if (!keysExactly(l, ['importedAt', 'transactions']) || !isTime(l.importedAt) || !Array.isArray(l.transactions) || !l.transactions.length || l.transactions.length > MAX_RECORDS) fail('账本备份无效');
       for (const t of l.transactions) {
-        if (!keysExactly(t, ['date', 'type', 'category', 'amount', 'currency']) || !validDate(t.date) || !types.has(t.type) || typeof t.category !== 'string' || !t.category.trim() || t.category.length > 200 || !Number.isSafeInteger(t.amount) || Math.abs(t.amount) > MAX_CENTS || t.currency !== 'CNY') fail('账本交易格式无效');
+        if (!(keysExactly(t, ['date', 'type', 'category', 'amount', 'currency']) || keysExactly(t, ['date', 'type', 'category', 'amount', 'currency', 'at', 'account'])) || !validDate(t.date) || !types.has(t.type) || typeof t.category !== 'string' || !t.category.trim() || t.category.length > 200 || !Number.isSafeInteger(t.amount) || Math.abs(t.amount) > MAX_CENTS || t.currency !== 'CNY') fail('账本交易格式无效');
+        if (Object.hasOwn(t, 'at') && ((t.at !== null && (!validLocalTime(t.at) || t.at.slice(0, 10) !== t.date)) || (t.account !== null && (typeof t.account !== 'string' || t.account.length > 1000)))) fail('交易时间或账户格式无效');
       }
       summarize(l.transactions);
     }
     if (raw.snapshot !== null) {
       const s = raw.snapshot;
-      if (!keysExactly(s, ['savedAt', 'values']) || !isTime(s.savedAt) || !keysExactly(s.values, fields.map(f => f[0]))) fail('资产快照格式无效');
+      if (!(keysExactly(s, ['savedAt', 'values']) || keysExactly(s, ['savedAt', 'asOf', 'values'])) || !isTime(s.savedAt) || (s.asOf !== undefined && !isTime(s.asOf)) || !keysExactly(s.values, fields.map(f => f[0]))) fail('资产快照格式无效');
       for (const [key, , unit] of fields) {
         const value = s.values[key];
         if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > (unit === '股' ? 1000000000 : MAX_CENTS))) fail('资产数值无效');
@@ -129,12 +140,77 @@
       if (p !== null && (!keysExactly(p, ['price', 'at']) || !Number.isSafeInteger(p.price) || p.price <= 0 || p.price > 100000000 || !isTime(p.at))) fail('股价格式无效');
     }
     if (q.mode === 'manual' && q.manual === null) fail('手动股价缺失');
+    if (raw.tracking !== null) {
+      const t = raw.tracking;
+      if (!keysExactly(t, ['enabled', 'mappings']) || typeof t.enabled !== 'boolean' || !Array.isArray(t.mappings) || t.mappings.length > 500) fail('账户自动更新设置无效');
+      const seen = new Set();
+      for (const m of t.mappings) {
+        if (!keysExactly(m, ['account', 'field']) || typeof m.account !== 'string' || !m.account.trim() || m.account.length > 200 || !['cash', 'wealth', 'provident', 'shortDebt', 'otherAssets', 'otherDebt', 'ignore', 'stock'].includes(m.field) || seen.has(m.account)) fail('账户分类设置无效');
+        seen.add(m.account);
+      }
+    }
     return JSON.parse(JSON.stringify(raw));
+  }
+  function accountMovements(t) {
+    if (t.type === '收入' || t.type === '支出') {
+      if (!t.account) fail('缺少收付账户，请重新导入新版挖财明细');
+      return [{ account: t.account, delta: t.type === '收入' ? t.amount : -t.amount }];
+    }
+    if (t.type !== '转账') fail('借贷交易需核对，不能直接推算账户余额');
+    const parts = String(t.account || '').split(/[，,]/);
+    if (parts.length < 2) fail('转账缺少两侧账户及方向');
+    const entries = parts.map(part => {
+      const match = part.trim().match(/^(.+?)[：:]\s*([+-]\d+(?:\.\d+)?)$/);
+      if (!match) fail('转账账户格式无法识别');
+      return { account: match[1].trim(), delta: cents(match[2].replace(/^\+/, '')) };
+    });
+    if (entries.reduce((sum, entry) => sum + entry.delta, 0) !== 0 || entries.reduce((sum, entry) => sum + Math.max(0, entry.delta), 0) !== Math.abs(t.amount) || !entries.some(e => e.delta < 0) || !entries.some(e => e.delta > 0)) fail('转账两侧金额或明细金额未配平');
+    return entries;
+  }
+  function ledgerAccounts(transactions) {
+    const accounts = new Set();
+    for (const t of transactions) {
+      if (t.type === '收入' || t.type === '支出') { if (t.account) accounts.add(t.account); }
+      else if (t.type === '转账') { try { for (const move of accountMovements(t)) accounts.add(move.account); } catch {} }
+    }
+    return [...accounts].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  }
+  function project(state) {
+    const baseline = state.snapshot;
+    if (!baseline) return null;
+    const values = { ...baseline.values }, asOf = localTime(baseline.asOf || baseline.savedAt);
+    const result = { values, asOf, through: null, active: Boolean(state.tracking?.enabled), applied: 0, issues: [] };
+    if (!result.active || !state.ledger) return result;
+    const map = new Map(state.tracking.mappings.map(m => [m.account, m.field]));
+    const records = state.ledger.transactions;
+    const summary = summarize(records);
+    if (summary.start > asOf.slice(0, 10)) result.issues.push('账本未覆盖余额基准日，请导入包含基准日至今的完整账本。');
+    for (const t of records) {
+      if (t.date < asOf.slice(0, 10) || (t.at && t.at <= asOf)) continue;
+      try {
+        if (!t.at) fail('交易缺少具体时间，无法判定是否已计入余额基准');
+        if (t.category.split('/').at(-1).trim() === '股票') fail('股票交易需确认股数后重设余额基准');
+        const moves = accountMovements(t);
+        const fieldsForRow = moves.map(move => {
+          const field = map.get(move.account);
+          if (!field) fail(`账户“${move.account}”尚未分类`);
+          if (field === 'stock') fail('股票账户有新记录，请确认持股数后重设余额基准');
+          if (field !== 'ignore' && values[field] === null) fail('对应资产项目的起始余额未知');
+          return field;
+        });
+        moves.forEach((move, i) => { const field = fieldsForRow[i]; if (field !== 'ignore') values[field] += ['shortDebt', 'otherDebt'].includes(field) ? -move.delta : move.delta; });
+        result.applied++;
+        if (!result.through || t.at > result.through) result.through = t.at;
+      } catch (error) { if (result.issues.length < 20) result.issues.push(`${t.at || t.date}：${error.message}`); }
+    }
+    if (Object.values(values).some(value => value !== null && (!Number.isSafeInteger(value) || value < 0 || value > MAX_CENTS))) result.issues.push('推算余额为负或超出范围，请核对账户记录并重设基准。');
+    if (result.issues.length) { result.values = { ...baseline.values }; result.applied = 0; result.through = null; }
+    return result;
   }
   function activeQuote(state) { return state.quote.mode === 'manual' ? state.quote.manual : state.quote.automatic; }
   function assets(state) {
     if (!state.snapshot) return null;
-    const values = state.snapshot.values;
+    const values = project(state).values;
     const price = activeQuote(state)?.price ?? null;
     const stock = values.shares === 0 ? 0 : values.shares === null || price === null ? null : values.shares * price;
     const items = [['cash', values.cash], ['wealth', values.wealth], ['provident', values.provident], ['shares', stock], ['otherAssets', values.otherAssets], ['shortDebt', values.shortDebt === null ? null : -values.shortDebt], ['otherDebt', values.otherDebt === null ? null : -values.otherDebt]];
@@ -148,7 +224,7 @@
     if (payload?.rc !== 0 || data?.f57 !== '688111' || !Number.isInteger(data.f43) || data.f43 <= 0 || data.f43 > 100000000 || !Number.isInteger(data.f86) || data.f86 < 946684800 || data.f86 * 1000 > now + 300000) fail('行情数据不可用');
     return { price: data.f43, at: new Date(data.f86 * 1000).toISOString() };
   }
-  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote };
+  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime };
   root.FinanceCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);
