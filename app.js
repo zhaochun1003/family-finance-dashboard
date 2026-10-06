@@ -178,9 +178,11 @@
   $('auto-price').addEventListener('click', () => { commit({ ...state, quote: { ...state.quote, mode: 'auto' } }, '已恢复采用自动行情。'); refreshQuote(); });
   $('refresh-quote').addEventListener('click', refreshQuote);
   $('export-backup').addEventListener('click', () => {
+    if (storageBlocked && !originalStored) return notify('浏览器阻止读取本地存储，无法导出原始副本。请检查浏览器设置。', true);
     const blob = new Blob([storageBlocked && originalStored ? originalStored : JSON.stringify(state)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob); const link = element('a'); link.href = url; link.download = `family-finance-backup-${new Date().toISOString().slice(0, 10)}.json`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-    notify(storageBlocked ? '已导出原始存储副本。内容可能损坏，请保留副本后恢复有效备份。' : '备份已导出；其中包含个人数据，请妥善保管。');
+    const date = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+    const url = URL.createObjectURL(blob); const link = element('a'); link.href = url; link.download = `family-finance-backup-${date}.json`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    notify(storageBlocked ? '已生成原始存储副本，请保存文件。内容可能损坏，请保留副本后恢复有效备份。' : '已生成备份，请在浏览器中保存文件；其中包含个人数据，请妥善保管。');
   });
   $('backup-file').addEventListener('change', async e => {
     const file = e.target.files[0]; if (!file) return;
