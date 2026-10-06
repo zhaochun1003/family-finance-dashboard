@@ -9,6 +9,7 @@
   let state = C.emptyState(), quoteStatus = '正在获取公开行情…', loading = false;
   let storageBlocked = false, originalStored = null;
   let quoteEpoch = 0;
+  let applyingCloud = false, cloudSync = null;
   function notify(text, error = false) {
     $('message').textContent = text;
     $('message').classList.toggle('error', error);
@@ -28,6 +29,7 @@
       storageBlocked = false; originalStored = null;
       render();
       if (message) notify(message);
+      if (!applyingCloud) window.dispatchEvent(new Event('finance-change'));
       return true;
     } catch (error) {
       notify(`未保存：${error.message}。若浏览器空间不足，请先导出备份再清理空间。原数据保留。`, true);
@@ -312,7 +314,7 @@
       const previousRecovery = await recovery('read');
       await recovery('write', state.ledger);
       if (signature() !== previewSignature) { await recovery(previousRecovery === undefined ? 'clear' : 'write', previousRecovery); throw new Error('保存期间数据已变化，请重新导入'); }
-      const saved = commit({ ...state, ledger: next.ledger }, `已导入 ${transactions.length.toLocaleString('zh-CN')} 笔记录，文件未上传。${projection?.active ? projection.issues.length ? '余额自动调整暂停，请查看当前快照的核对提示。' : `余额已按基准之后 ${projection.applied} 笔记录调整。` : ''}`);
+      const saved = commit({ ...state, ledger: next.ledger }, `已导入 ${transactions.length.toLocaleString('zh-CN')} 笔记录，原始 Excel 文件未上传。${projection?.active ? projection.issues.length ? '余额自动调整暂停，请查看当前快照的核对提示。' : `余额已按基准之后 ${projection.applied} 笔记录调整。` : ''}`);
       if (!saved) await recovery(previousRecovery === undefined ? 'clear' : 'write', previousRecovery);
       $('undo-import').hidden = !saved && previousRecovery === undefined;
     } catch (error) { notify(`导入失败：${error.message} 原数据保留。`, true); }
@@ -408,13 +410,18 @@
   $('clear-data').addEventListener('click', async () => {
     if (importing || recoveryBusy) return notify('请先完成或取消当前导入。', true);
     if (!confirm('删除此浏览器保存的所有账本、资产和股价设置？请先导出备份。')) return;
-    try { await recovery('clear'); $('undo-import').hidden = true; localStorage.removeItem(STORAGE_KEY); quoteEpoch++; state = C.emptyState(); storageBlocked = false; originalStored = null; quoteStatus = '已清空；点击刷新获取行情'; render(); notify('本地数据已清空。'); }
+    try { cloudSync?.pause(); await recovery('clear'); $('undo-import').hidden = true; localStorage.removeItem(STORAGE_KEY); quoteEpoch++; state = C.emptyState(); storageBlocked = false; originalStored = null; quoteStatus = '已清空；点击刷新获取行情'; render(); notify('本地数据已清空。'); }
     catch { notify('浏览器未允许清空存储，请检查浏览器设置。', true); }
   });
   window.addEventListener('storage', e => {
     if (e.key !== STORAGE_KEY) return;
     try { const next = e.newValue ? C.validateState(JSON.parse(e.newValue)) : C.emptyState(); C.assets(next); state = next; quoteEpoch++; render(); notify('数据已随此浏览器的另一个页面更新。'); }
     catch { notify('另一个页面写入的数据无法识别，当前页面保留原数据。', true); }
+  });
+  cloudSync = window.FinanceSync?.init({
+    get: () => state,
+    blocked: () => storageBlocked || importing || recoveryBusy || !!document.querySelector('dialog[open]'),
+    apply: next => { applyingCloud = true; try { quoteEpoch++; return commit(next, '已读取云端数据。'); } finally { applyingCloud = false; } }
   });
   render(); refreshQuote();
   setInterval(refreshQuote, 60000);

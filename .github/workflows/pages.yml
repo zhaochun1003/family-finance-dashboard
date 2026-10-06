@@ -22,14 +22,14 @@ jobs:
         with:
           node-version: '22'
       - name: Validate calculations and backup format
-        run: node --test tests/core.test.cjs
+        run: node --test tests/core.test.cjs tests/sync.test.cjs tests/supabase-client.test.cjs
       - name: Package only public app assets
         run: |
           mkdir -p _site/vendor
-          cp index.html styles.css core.js app.js favicon.svg _site/
-          cp vendor/xlsx.full.min.js vendor/LICENSE.sheetjs _site/vendor/
+          cp index.html styles.css core.js app.js sync.js supabase-client.js favicon.svg _site/
+          cp vendor/xlsx.full.min.js vendor/LICENSE.sheetjs vendor/supabase.min.js vendor/LICENSE.supabase _site/vendor/
           touch _site/.nojekyll
-          node -e "const fs = require('node:fs'); const crypto = require('node:crypto'); let html = fs.readFileSync('_site/index.html', 'utf8'); for (const file of ['styles.css', 'core.js', 'app.js', 'vendor/xlsx.full.min.js']) { const hash = crypto.createHash('sha256').update(fs.readFileSync('_site/' + file)).digest('hex').slice(0, 12); html = html.replace('./' + file, './' + file + '?v=' + hash); } fs.writeFileSync('_site/index.html', html);"
+          node -e "const fs = require('node:fs'); const crypto = require('node:crypto'); let html = fs.readFileSync('_site/index.html', 'utf8'); for (const file of ['styles.css', 'core.js', 'app.js', 'sync.js', 'supabase-client.js', 'vendor/xlsx.full.min.js', 'vendor/supabase.min.js']) { const hash = crypto.createHash('sha256').update(fs.readFileSync('_site/' + file)).digest('hex').slice(0, 12); html = html.replace('./' + file, './' + file + '?v=' + hash); } fs.writeFileSync('_site/index.html', html);"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
