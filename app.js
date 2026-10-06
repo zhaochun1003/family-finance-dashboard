@@ -187,6 +187,7 @@
     for(const n of state.notes){const matches=C.noteMatches(state,n);if(n.status==='pending'||matches.some(m=>m.count!==1))items.push(`${n.title}${matches.some(m=>m.count!==1)?'：关联交易需重核':''}`);}
     if(!items.length)items.push('暂无已标记事项；请定期核对账户余额及备份。');
     for(const item of items.slice(0,3))attention.append(element('li',item));
+    for(const id of ['account-rows','history-rows']){const body=$(id),labels=[...body.closest('table').querySelectorAll('thead th')].map(th=>th.textContent);for(const row of body.rows)for(let i=0;i<row.cells.length;i++)row.cells[i].dataset.label=labels[i];}
   }
   function renderFlow() {
     const month=$('flow-month').value, flow=C.cashflow(state,month);
