@@ -24,7 +24,7 @@
     let enabled=false,meta=null,busy=false,again=false,conflict=null,authenticated=false;
     let corruptMeta=false;
     try {const saved=localStorage.getItem(META_KEY);if(saved){meta=JSON.parse(saved);if(meta.version!==1||typeof meta.enabled!=='boolean'||!Number.isSafeInteger(meta.revision)||meta.revision<0||!(meta.base===null||/^[a-f0-9]{64}$/.test(meta.base)))throw new Error('meta');enabled=meta.enabled;}}catch{corruptMeta=true;}
-    function status(text,error=false) {$('sync-status').textContent=text;$('sync-status').classList.toggle('error',error);}
+    function status(text,error=false) {$('sync-status').textContent=text;$('sync-status').classList.toggle('error',error);const badge=document.querySelector?.('.local-badge');if(badge){badge.textContent=text.startsWith('已同步')?'已同步':error?'同步需检查':enabled?'同步已开启':'仅本机保存';badge.title=text;}}
     function save(revision,base) {const next={version:1,enabled,revision,base};localStorage.setItem(META_KEY,JSON.stringify(next));meta=next;}
     async function api(path,options={}) {
       const response=transport ? await transport.request(path,options) : await fetch(path,{...options,credentials:'same-origin',cache:'no-store',headers:{'X-Finance-Request':'1',...(options.body?{'Content-Type':'application/json'}:{}),...options.headers}});
