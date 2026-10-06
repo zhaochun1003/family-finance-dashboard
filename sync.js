@@ -64,7 +64,7 @@
         const head=await api('/api/snapshot?meta=1');
         if(!enabled)return;
         let localBase=await hash(canonical(adapter.get()));
-        if(meta&&head.revision===meta.revision){
+        if(meta&&meta.base!==null&&head.revision===meta.revision){
           if(localBase!==meta.base){status('正在同步…');await upload(head.revision);}return;
         }
         const row=await remote();
@@ -76,7 +76,7 @@
           if(hasData(adapter.get()))await upload(0);else{save(0,localBase);status('云端为空，更新数据后会自动同步。');}return;
         }
         if(row.base===localBase){save(row.revision,row.base);conflict=null;$('sync-conflict').hidden=true;status('已同步');return;}
-        if((meta&&localBase===meta.base)||(!meta&&!hasData(adapter.get()))){await adopt(row);return;}
+        if((meta&&localBase===meta.base)||((!meta||meta.base===null)&&!hasData(adapter.get()))){await adopt(row);return;}
         showConflict(row);
       } catch(error) {
         if(error.conflict){try{showConflict(await remote());}catch(e){status(e.message,true);}}
@@ -96,7 +96,9 @@
     $('sync-enable').addEventListener('click',async()=>{
       if(!authenticated){$('sync-login').hidden=false;$('sync-email').focus();return;}
       if(!confirm('启用后，账本交易、账户资产、核实记录和资产历史会同步到你账户下的 Supabase 私有数据库；其他已登录设备会自动读取。原始 Excel 文件不上传。确定启用？'))return;
-      enabled=true;corruptMeta=false;meta=null;localStorage.removeItem(META_KEY);$('sync-enable').hidden=true;$('sync-pause').hidden=false;await reconcile();
+      enabled=true;
+      try{save(meta?.revision||0,meta?.base||null);}catch{enabled=false;status('无法保存同步设置，请检查浏览器存储权限；财务数据未上传。',true);return;}
+      corruptMeta=false;$('sync-enable').hidden=true;$('sync-pause').hidden=false;await reconcile();
     });
     function pause() {enabled=false;save(meta?.revision||0,meta?.base||null);status('同步已暂停，本机和云端数据均保留。');$('sync-enable').hidden=false;$('sync-pause').hidden=true;}
     $('sync-pause').addEventListener('click',pause);
