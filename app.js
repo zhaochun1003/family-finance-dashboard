@@ -127,7 +127,15 @@
     }
     else list.append(element('p','添加账户余额，或先填写分类余额建立基准。','muted'));
     $('unvested-note').textContent=result?.unvested==null ? '待归属股数未知，不计当前净资产。' : `待归属 ${result.unvested.toLocaleString('zh-CN')} 股，不计当前净资产。`;
-    $('family-status').textContent=!result?'尚未核全家庭资产。':`已知家庭项目净额 ${headline(result.total)}。${result.partial?'其他家庭项目仍有未知项。':'字段已填全，家庭覆盖范围仍需人工确认。'}`;
+    $('family-net').textContent=result?.any ? headline(result.total) : '—';
+    $('family-status').textContent=!result ? '建立金融余额后，补充当前持有的家庭资产负债。' : result.partial ? '已知项目合计 · 车辆估值或贷款余额未核对时，不作为完整家庭净资产。' : '已填写项目合计 · 请确认家庭资产与负债均已覆盖。';
+    const familyItems=$('family-items');familyItems.replaceChildren();
+    $('property-history').hidden=!state.notes.some(n=>/售房|卖房|房产处置/.test(n.detail+' '+n.title));
+    for(const name of ['汽车','车贷']) {
+      const account=state.accounts.find(a=>a.account===name && a.field===(['车贷','房贷'].includes(name)?'otherDebt':'otherAssets'));
+      const row=element('div');row.append(element('span',name),element('strong',account?.balance==null?'金额待核对':money(account.balance)+' 元'));
+      if(account)row.append(element('small','核对日期 '+time(account.at),'muted'));familyItems.append(row);
+    }
   }
   function renderQuote() {
     const quote = C.activeQuote(state);
@@ -227,6 +235,13 @@
     const field=$('account-field').value||null;
     return {account,field,debt:field?C.debtFields.includes(field):$('account-debt').checked,balance:C.cents($('account-balance').value,false),at:new Date($('account-at').value+'+08:00').toISOString(),members:editingAccount?.members===null?null:[account]};
   }
+  document.querySelectorAll('[data-family]').forEach(button=>button.addEventListener('click',()=>{
+    const name=button.dataset.family,debt=['车贷','房贷'].includes(name),field=debt?'otherDebt':'otherAssets';
+    const existing=state.accounts.find(a=>a.account===name && a.field===field);
+    openAccount(existing);if(!existing){$('account-name').value=name;$('account-field').value=field;$('account-debt').checked=debt;}
+    $('account-baseline-note').textContent=(debt?'填写尚未偿还的本金，不含未来利息。':'填写当前合理估计的出售价值，不用购入原价。')+' 如已包含在分类汇总中，请先到账户页拆分明细，避免重复计入。';
+  }));
+  $('update-family').addEventListener('click',()=>{$('update-dialog').close();showView('summary');document.querySelector('[data-family="汽车"]').focus();});
   $('edit-account').addEventListener('click',()=>openAccount());$('close-account').addEventListener('click',()=>$('account-dialog').close());
   $('account-form').addEventListener('submit',e=>{
     e.preventDefault();try{const actual=accountInput();if(!actual)return;const baseline=state.accounts.find(a=>a.account===actual.account);let text;
