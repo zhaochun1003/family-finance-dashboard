@@ -57,3 +57,12 @@ button,.button{min-height:44px;border-radius:10px;padding:10px 14px;line-height:
 .family-net{display:block;font-size:32px;letter-spacing:-1px;margin:12px 0 8px;font-variant-numeric:tabular-nums}
 .family-items{margin:16px 0}.family-items>div{display:grid;grid-template-columns:1fr auto;gap:6px;padding:12px 0;border-bottom:1px solid var(--border,#e8e8ed)}
 .family-items strong{font-size:14px;font-weight:500}.family-items small{grid-column:1/-1;font-size:12px}
+
+/* Daily overview: totals first, detail navigation stays lightweight. */
+.financial-subtotal{display:flex;align-items:baseline;justify-content:space-between;border-top:1px solid #eeeef3;margin-top:18px;padding-top:16px;gap:12px}
+.financial-subtotal b{font-size:24px;font-variant-numeric:tabular-nums}.metric .financial-subtotal span{margin:0}
+.summary-actions{grid-template-columns:1fr!important;gap:0!important;margin-top:18px}.summary-actions button{display:flex;justify-content:space-between;background:transparent!important;border-radius:0!important;text-align:left;padding:14px 0!important;border-bottom:1px solid #eeeef3!important;color:#1c1c1e!important}.summary-actions button:after{content:'›';color:#9b9ba3;font-size:20px}
+.monthly-totals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:22px 0}.monthly-totals span{display:block;color:#777780;font-size:13px}.monthly-totals strong{display:block;margin-top:8px;font-size:24px;font-variant-numeric:tabular-nums}
+#data-health{background:transparent;border:0;padding:0;color:#777780;font-size:12px;margin:12px 0 22px}#data-health.error{color:#b54335;background:#fff1ed;padding:12px;border-radius:12px}
+#property-history{font-size:12px}.ledger-metrics{margin-top:24px}#message:not(.error){position:fixed;bottom:90px;left:50%;transform:translateX(-50%);z-index:20;max-width:calc(100% - 32px);width:max-content;box-shadow:0 4px 24px #00000012;border-radius:14px;background:#fff;padding:12px 18px}
+@media(max-width:600px){.monthly-totals{grid-template-columns:1fr 1fr;gap:18px}.monthly-totals>div:last-child{grid-column:1/-1}.monthly-totals strong{font-size:22px}.financial-subtotal b{font-size:22px}}

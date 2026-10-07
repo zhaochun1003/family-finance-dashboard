@@ -365,7 +365,7 @@
   }
   function cashflow(state, month) {
     let income=0,expense=0,transfers=0,loans=0,unreviewed=0;
-    const buckets=Object.fromEntries(purposes.map(p=>[p,0]));
+    const buckets=Object.fromEntries(purposes.map(p=>[p,0])),bucketCounts=Object.fromEntries(purposes.map(p=>[p,0]));
     const counts=new Map();for(const t of state.ledger?.transactions||[]){const key=transactionKey(t);counts.set(key,(counts.get(key)||0)+1);}
     const notes=state.notes.filter(n=>n.status==='confirmed' && n.purpose!=='unknown');
     for (const t of state.ledger?.transactions || []) {
@@ -374,10 +374,10 @@
       if(t.type==='收入') income+=t.amount; else expense+=t.amount;
       const matches=notes.filter(n=>n.keys.includes(transactionKey(t)));
       const purpose=matches.length===1 && counts.get(transactionKey(t))===1 ? matches[0].purpose : 'unknown';
-      buckets[purpose]+=t.type==='收入' ? t.amount : -t.amount;
+      bucketCounts[purpose]++;buckets[purpose]+=t.type==='收入' ? t.amount : -t.amount;
       if(purpose==='unknown') unreviewed++;
     }
-    return {income,expense,difference:income-expense,transfers,loans,unreviewed,buckets};
+    return {income,expense,difference:income-expense,transfers,loans,unreviewed,buckets,bucketCounts};
   }
   function equityScenario(state) {
     const p=project(state), f=financial(state), scenario=state.scenario;

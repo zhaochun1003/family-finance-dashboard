@@ -236,3 +236,11 @@ test('import change preview preserves duplicate multiplicity and includes old/ne
  assert.equal(C.scheduledLoan(s,a,'2025-05-21T00:00:00Z').balance,0);
  s.notes[0].source='invalid';assert.equal(C.scheduledLoan(s,a),null);
  });
+
+test('cashflow distinguishes a confirmed zero net amount from no confirmed records',()=>{
+ const s=C.emptyState(),t={date:'2025-01-01',type:'支出',category:'虚构',amount:100,currency:'CNY'};
+ s.ledger={transactions:[t,{...t,date:'2025-01-02',type:'收入'}]};
+ let f=C.cashflow(s,'2025-01');assert.equal(f.bucketCounts.consumption,0);assert.equal(f.unreviewed,2);
+ s.notes=[{status:'confirmed',purpose:'consumption',keys:s.ledger.transactions.map(C.transactionKey)}];
+ f=C.cashflow(s,'2025-01');assert.equal(f.buckets.consumption,0);assert.equal(f.bucketCounts.consumption,2);assert.equal(f.unreviewed,0);
+});

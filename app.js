@@ -10,7 +10,9 @@
   let storageBlocked = false, originalStored = null;
   let quoteEpoch = 0;
   let applyingCloud = false, cloudSync = null;
+  let noticeTimer;
   function notify(text, error = false) {
+    clearTimeout(noticeTimer);if(!error)noticeTimer=setTimeout(()=>{$('message').hidden=true;},6000);
     $('message').textContent = text;
     $('message').classList.toggle('error', error);
     $('message').hidden = false;
@@ -127,8 +129,12 @@
     }
     else list.append(element('p','添加账户余额，或先填写分类余额建立基准。','muted'));
     $('unvested-note').textContent=result?.unvested==null ? '待归属股数未知，不计当前净资产。' : `待归属 ${result.unvested.toLocaleString('zh-CN')} 股，不计当前净资产。`;
-    $('family-net').textContent=result?.any ? headline(result.total) : '—';
-    $('family-status').textContent=!result ? '建立金融余额后，补充当前持有的家庭资产负债。' : result.partial ? '已知项目合计 · 车辆估值或贷款余额未核对时，不作为完整家庭净资产。' : '已填写项目合计 · 请确认家庭资产与负债均已覆盖。';
+    $('family-net').textContent=result?.any ? '约 '+headline(result.total) : '—';
+    const debts=projection?[projection.values.shortDebt,projection.values.otherDebt]:[];
+    $('debt-value').textContent=debts.some(v=>v!==null)?headline(debts.reduce((s,v)=>s+(v||0),0)):'—';
+    $('debt-note').textContent=debts.some(v=>v===null)?'部分负债尚未核对':'短期负债＋贷款本金 · 含计划推算';
+    $('vehicle-evidence').textContent=state.notes.find(n=>n.id==='vehicle-market-estimate')?.detail || '按当前预计出售价值记录，并保留参考依据。';
+    $('family-status').textContent=!result ? '建立金融余额后，补充当前持有的家庭资产负债。' : result.partial ? '已知项目合计 · 车辆估值或贷款余额未核对时，不作为完整家庭净资产。' : '含车辆参考估值与贷款计划推算 · 查看各项核对日期';
     const familyItems=$('family-items');familyItems.replaceChildren();
     $('property-history').hidden=!state.notes.some(n=>/售房|卖房|房产处置/.test(n.detail+' '+n.title));
     for(const name of ['汽车','车贷']) {
@@ -168,7 +174,7 @@
   $('update-restore').addEventListener('click',()=>{$('update-dialog').close();showView('settings');$('backup-file').click();});
   function renderReview() {
     const projection=C.project(state), f=C.financial(state);
-    $('data-health').textContent=!projection ? state.ledger?'账本已导入。点击“更新数据”恢复完整备份或填写余额，即可建立资产总览。':'点击“更新数据”开始：恢复完整备份，或分别导入账本与填写余额。' : projection.issues.length ? `余额推算已暂停，展示各账户基准余额，不能视为同一时点的当前余额。${projection.issues.slice(0,3).join('；')}` : `${f?.partial?'金融项目尚未核全。':'金融账户口径；完整家庭资产仍需核实。'} ${projection.active?'余额按账本推算，需与实际账户核对。':'展示实际余额基准。'} 行情时间与余额时间分别保留。`;
+    $('data-health').textContent=!projection ? state.ledger?'账本已导入。点击“更新数据”恢复完整备份或填写余额，即可建立资产总览。':'点击“更新数据”开始：恢复完整备份，或分别导入账本与填写余额。' : projection.issues.length ? `余额推算已暂停，展示各账户基准余额，不能视为同一时点的当前余额。${projection.issues.slice(0,3).join('；')}` : `${f?.partial?'部分金融余额待核对。':'金融余额已建立。'} ${projection.active?'余额按账本推算。':'展示余额基准。'} 同步成功不代表已核实。`;
     $('data-health').classList.toggle('error',Boolean(projection?.issues.length));
     const rows=$('account-rows');rows.replaceChildren();
     const accountQuery=$('account-filter').value.trim().toLowerCase();let visibleAccounts=0;
@@ -191,17 +197,20 @@
     if(!state.snapshot)items.push(state.ledger?'账本已准备好，请补充当前余额或恢复完整备份。':'从“更新数据”开始建立你的财务首页。');
     if(projection?.issues.length)items.push(...projection.issues.slice(0,3));
     if(state.accounts.some(a=>a.field && a.members===null && a.balance!==null))items.push('部分余额仍为分类汇总，可用完整明细拆分；不要重复添加已包含的账户。');
-    if(!state.history.length)items.push('资产历史尚无记录，确认当前余额后可记录第一份。');
-    for(const n of state.notes){const matches=C.noteMatches(state,n);if(n.status==='pending'||matches.some(m=>m.count!==1))items.push(`${n.title}${matches.some(m=>m.count!==1)?'：关联交易需重核':''}`);}
+    const quote=C.activeQuote(state);if(projection?.values.shares>0 && (!quote || Date.now()-new Date(quote.at).getTime()>7*86400000))items.push('股票采用缓存价格，请查看行情日期。');
+    if(!state.history.length)items.push('资产历史尚无记录，可确认余额后记录。');
+    const pending=state.notes.filter(n=>n.status==='pending'||C.noteMatches(state,n).some(m=>m.count!==1));if(pending.length)items.push(`另有 ${pending.length} 条历史核实事项，可进入详情处理。`);
     if(!items.length)items.push('暂无已标记事项；请定期核对账户余额及备份。');
     for(const item of items.slice(0,3))attention.append(element('li',item));
     for(const id of ['account-rows','history-rows']){const body=$(id),labels=[...body.closest('table').querySelectorAll('thead th')].map(th=>th.textContent);for(const row of body.rows)for(let i=0;i<row.cells.length;i++)row.cells[i].dataset.label=labels[i];}
   }
   function renderFlow() {
     const month=$('flow-month').value, flow=C.cashflow(state,month);
-    $('flow-summary').textContent=!state.ledger?'导入账本后显示。':`${month} · 原账收入 ${money(flow.income)} 元，原账支出 ${money(flow.expense)} 元，差额 ${money(flow.difference)} 元；${flow.transfers} 笔转账、${flow.loans} 笔借贷另列。${flow.unreviewed} 笔收支尚无唯一确认用途。`;
+    for(const [id,value] of [['month-income',flow.income],['month-expense',flow.expense],['month-difference',flow.difference]])$(id).textContent=state.ledger?headline(value):'—';
+    const end=state.ledger?C.summarize(state.ledger.transactions).end:null;
+    $('flow-summary').textContent=!state.ledger?'导入账本后显示。':`${month}${end?.startsWith(month)?' · 数据截至 '+end+'（非完整月份）':''} · ${flow.transfers} 笔转账、${flow.loans} 笔借贷另列；${flow.unreviewed} 笔用途未确认。差额不代表储蓄或真实消费。`;
     const list=$('flow-buckets');list.replaceChildren();
-    for(const [purpose,value]of Object.entries(flow.buckets)){const row=element('div');row.append(element('span',purposeLabels[purpose]),element('span',money(value)+' 元'));list.append(row);}
+    for(const [purpose,value]of Object.entries(flow.buckets)){const row=element('div');row.append(element('span',purpose==='unknown'?'未核实收支净差额':purposeLabels[purpose]),element('span',!state.ledger?'—':purpose!=='unknown'&&!flow.bucketCounts[purpose]?'尚未确认':money(value)+' 元'));list.append(row);}
   }
   function renderNotes() {
     const list=$('note-list');list.replaceChildren();
