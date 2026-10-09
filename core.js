@@ -174,7 +174,7 @@
     if (!Array.isArray(raw.notes) || raw.notes.length > 1000) fail('核实记录格式无效');
     const noteIds = new Set();
     for (const n of raw.notes) {
-      if (!keysExactly(n, ['id','title','detail','source','status','purpose','keys']) || typeof n.id !== 'string' || !n.id || n.id.length > 100 || noteIds.has(n.id) || !['confirmed','pending'].includes(n.status) || !purposes.includes(n.purpose) || !Array.isArray(n.keys) || n.keys.length > 200 || n.keys.some(k => typeof k !== 'string' || k.length > 2000) || ['title','detail','source'].some(k => typeof n[k] !== 'string' || n[k].length > (k === 'title' ? 200 : 5000)) || !n.title.trim()) fail('核实记录内容无效');
+      if (!keysExactly(Object.fromEntries(Object.entries(n).filter(([k])=>!['compensationYear','eventId'].includes(k))), ['id','title','detail','source','status','purpose','keys']) || (n.eventId!==undefined && (typeof n.eventId!=='string'||n.eventId.length>200)) || (n.compensationYear!==undefined && n.compensationYear!==null && (!Number.isInteger(n.compensationYear)||n.compensationYear<1900||n.compensationYear>2200)) || typeof n.id !== 'string' || !n.id || n.id.length > 100 || noteIds.has(n.id) || !['confirmed','pending'].includes(n.status) || !purposes.includes(n.purpose) || !Array.isArray(n.keys) || n.keys.length > 200 || n.keys.some(k => typeof k !== 'string' || k.length > 2000) || ['title','detail','source'].some(k => typeof n[k] !== 'string' || n[k].length > (k === 'title' ? 200 : 5000)) || !n.title.trim()) fail('核实记录内容无效');
       noteIds.add(n.id);
     }
     if (raw.scenario !== null && (!keysExactly(raw.scenario, ['price','subscription','tax']) || ['price','subscription','tax'].some(k => raw.scenario[k] !== null && (!Number.isSafeInteger(raw.scenario[k]) || raw.scenario[k] < 0 || raw.scenario[k] > MAX_CENTS)) || raw.scenario.price === 0 || raw.scenario.price > 100000000)) fail('股权情景格式无效');
@@ -239,7 +239,7 @@
 
   const moneyFields = ['cash','wealth','provident','shortDebt','otherAssets','otherDebt'];
   const debtFields = ['shortDebt','otherDebt'];
-  const purposes = ['unknown','consumption','family','investment','debt','refund','adjustment'];
+  const purposes = ['unknown','consumption','family','investment','debt','refund','adjustment','disposal','internal','prepaid','salary','bonus','noncash'];
   function migrateAccounts(state) {
     const accounts = (state.accounts || []).map(a => ({ ...a, field: null, members: [a.account] }));
     if (state.snapshot) for (const field of moneyFields) accounts.push({ account: `分类汇总 · ${fields.find(f => f[0] === field)[1]}`, field, members: null, debt: debtFields.includes(field), balance: state.snapshot.values[field], at: state.snapshot.asOf || state.snapshot.savedAt });
@@ -367,7 +367,7 @@
     let income=0,expense=0,transfers=0,loans=0,unreviewed=0;
     const buckets=Object.fromEntries(purposes.map(p=>[p,0])),bucketCounts=Object.fromEntries(purposes.map(p=>[p,0]));
     const counts=new Map();for(const t of state.ledger?.transactions||[]){const key=transactionKey(t);counts.set(key,(counts.get(key)||0)+1);}
-    const notes=state.notes.filter(n=>n.status==='confirmed' && n.purpose!=='unknown');
+    const notes=state.notes.filter(n=>n.status==='confirmed');
     for (const t of state.ledger?.transactions || []) {
       if (!t.date.startsWith(month)) continue;
       if (t.type==='转账') {transfers++;continue;} if(t.type==='借贷'){loans++;continue;}
@@ -378,6 +378,54 @@
       if(purpose==='unknown') unreviewed++;
     }
     return {income,expense,difference:income-expense,transfers,loans,unreviewed,buckets,bucketCounts};
+  }
+  // Analysis reads immutable ledger records. Conflicting links remain unknown.
+  function analysis(state, year) {
+    const tx=state.ledger?.transactions||[], counts=new Map(), links=new Map(),byKey=new Map();
+    for(const t of tx){const k=transactionKey(t);counts.set(k,(counts.get(k)||0)+1);byKey.set(k,t);}
+    for(const n of state.notes.filter(n=>n.status==='confirmed'))for(const k of new Set(n.keys)){if(!links.has(k))links.set(k,[]);links.get(k).push(n);}
+    let income=0,expense=0,unknown=0,excluded=0,bonusUnknown=0,cashIncome=0,cashExpense=0,transferCount=0,adjustmentCount=0,unassignedBonus=0;
+    const compensation={}, events=[];
+    for(const t of tx){
+      const k=transactionKey(t),ns=links.get(k)||[],n=counts.get(k)===1&&ns.length===1?ns[0]:null;
+      const cash=t.type==='收入'||t.type==='支出', selected=t.date.slice(0,4)===String(year);
+      if(selected && !cash)transferCount++;
+      if(selected && cash){
+        if(n && ['internal','adjustment','noncash'].includes(n.purpose)){adjustmentCount++;}else{if(t.type==='收入')cashIncome+=t.amount;else cashExpense+=t.amount;}
+        if(t.type==='收入' && t.category.split('/').at(-1).trim()==='奖金' && (!n || n.compensationYear==null || !['salary','bonus'].includes(n.purpose)))unassignedBonus+=t.amount;
+        if(n && ['internal','debt','adjustment','prepaid','noncash'].includes(n.purpose))excluded+=t.amount;else{if(t.type==='收入')income+=t.amount;else expense+=t.amount;if(!n||n.purpose==='unknown')unknown++;}}
+      if(cash && n && ['salary','bonus'].includes(n.purpose) && t.type==='收入'){
+        const y=n.compensationYear;if(y==null){if(selected)bonusUnknown+=t.amount;}else compensation[y]=(compensation[y]||0)+t.amount;
+      }
+    }
+    for(const n of state.notes){if(!n.keys.length)continue;let incoming=0,outgoing=0,matched=0,unresolved=0;
+      for(const k of new Set(n.keys)){
+        const ns=links.get(k)||[];if(n.status!=='confirmed'||counts.get(k)!==1||ns.length!==1){unresolved++;continue;}
+        const t=byKey.get(k);if(!['收入','支出'].includes(t.type)||['unknown','internal','debt','adjustment','prepaid','noncash'].includes(n.purpose)){unresolved++;continue;}
+        matched++;if(t.type==='收入')incoming+=t.amount;else outgoing+=t.amount;
+      }
+      events.push({id:n.id,incoming,outgoing,net:outgoing-incoming,matched,unresolved});
+    }
+    const grouped=new Map();for(const e of events){const n=state.notes.find(n=>n.id===e.id),id=n.eventId||n.id;if(!grouped.has(id))grouped.set(id,{id,incoming:0,outgoing:0,net:0,matched:0,unresolved:0});const group=grouped.get(id);for(const k of ['incoming','outgoing','net','matched','unresolved'])group[k]+=e[k];}
+    return {income,expense,difference:income-expense,unknown,excluded,bonusUnknown,compensation,cashIncome,cashExpense,cashDifference:cashIncome-cashExpense,transferCount,adjustmentCount,unassignedBonus,events,eventGroups:[...grouped.values()]};
+  }
+  function monthlyEstimate(state){
+    const note=state.notes.find(n=>n.id==='monthly-forecast');if(!note)return null;
+    let data;try{data=JSON.parse(note.detail);}catch{return null;}
+    if(!data || !['salary','fixed','other'].every(k=>Number.isSafeInteger(data[k])&&data[k]>=0&&data[k]<=MAX_CENTS))return null;
+    const high=data.otherHigh??data.other,extra=data.additional??0;
+    if(!Number.isSafeInteger(high)||high<data.other||high>MAX_CENTS||!Number.isSafeInteger(extra)||extra<0||extra>MAX_CENTS)return null;
+    const low=data.salary-data.fixed-high-extra,upper=data.salary-data.fixed-data.other-extra;
+    if(!Number.isSafeInteger(low)||!Number.isSafeInteger(upper))return null;
+    return {low,high:upper,data,source:note.source,reviewed:note.status==='confirmed' && data.version===2 && validDate(data.asOf),asOf:data.asOf||null};
+  }
+  function periodCoverage(transactions, month){
+    if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(month||''))return {count:0,start:null,end:null,partial:false};
+    const dates=transactions.filter(t=>t.date.startsWith(month)).map(t=>t.date).sort();
+    if(!dates.length)return {count:0,start:null,end:null,partial:false};
+    const [year,m]=month.split('-').map(Number),last=new Date(Date.UTC(year,m,0)).toISOString().slice(0,10);
+    const ledgerEnd=transactions.reduce((end,t)=>t.date>end?t.date:end,'');
+    return {count:dates.length,start:dates[0],end:dates.at(-1),partial:ledgerEnd.startsWith(month)&&ledgerEnd<last};
   }
   function equityScenario(state) {
     const p=project(state), f=financial(state), scenario=state.scenario;
@@ -449,7 +497,7 @@
     if (payload?.rc !== 0 || data?.f57 !== '688111' || !Number.isInteger(data.f43) || data.f43 <= 0 || data.f43 > 100000000 || !Number.isInteger(data.f86) || data.f86 < 946684800 || data.f86 * 1000 > now + 300000) fail('行情数据不可用');
     return { price: data.f43, at: new Date(data.f86 * 1000).toISOString() };
   }
-  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime, ledgerDiff, reconcile, capture, moneyFields, debtFields, purposes, ledgerChanges, accountMembers, accountProjection, mergeVehicle, scheduledLoan, migrateAccounts, saveAccount, splitAccount, financial, transactionKey, noteMatches, cashflow, equityScenario };
+  const api = { VERSION, fields, emptyState, cents, dateOnly, parseRows, parseWorkbook, summarize, validateState, activeQuote, assets, parseQuote, accountMovements, ledgerAccounts, project, localTime, ledgerDiff, reconcile, capture, moneyFields, debtFields, purposes, ledgerChanges, accountMembers, accountProjection, mergeVehicle, scheduledLoan, migrateAccounts, saveAccount, splitAccount, financial, transactionKey, noteMatches, cashflow, analysis, monthlyEstimate, periodCoverage, equityScenario };
   root.FinanceCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

@@ -244,3 +244,54 @@ test('cashflow distinguishes a confirmed zero net amount from no confirmed recor
  s.notes=[{status:'confirmed',purpose:'consumption',keys:s.ledger.transactions.map(C.transactionKey)}];
  f=C.cashflow(s,'2025-01');assert.equal(f.buckets.consumption,0);assert.equal(f.bucketCounts.consumption,2);assert.equal(f.unreviewed,0);
 });
+
+test('analysis preserves cross-month flows and counts a uniquely linked event once',()=>{
+  const s=C.emptyState();const buy={date:'2025-09-03',type:'支出',category:'设备',amount:100000,currency:'人民币'},sell={...buy,date:'2025-10-03',type:'收入',amount:40000};
+  s.ledger={transactions:[buy,sell]};s.notes=[{id:'event',status:'confirmed',purpose:'investment',keys:[C.transactionKey(buy),C.transactionKey(sell),C.transactionKey(buy)]}];
+  const before=JSON.stringify(s.ledger);const a=C.analysis(s,2025);assert.equal(a.events[0].net,60000);assert.equal(a.events[0].matched,2);assert.equal(C.cashflow(s,'2025-09').expense,100000);assert.equal(C.cashflow(s,'2025-10').income,40000);assert.equal(JSON.stringify(s.ledger),before);
+  s.notes.push({...s.notes[0],id:'conflict'});assert.equal(C.analysis(s,2025).events[0].matched,0);assert.equal(C.analysis(s,2025).unknown,2);
+  s.notes.pop();s.ledger.transactions.push({...buy});assert.equal(C.analysis(s,2025).events[0].unresolved,1);
+});
+test('analysis separates receipt year, compensation year, and excludes confirmed non-consumption',()=>{
+  const s=C.emptyState();const tx=['bonus','internal','prepaid','debt','unknown'].map((k,i)=>({date:'2026-01-0'+(i+1),type:i===0?'收入':'支出',category:k,amount:10000,currency:'人民币'}));s.ledger={transactions:tx};s.notes=tx.slice(0,4).map((t,i)=>({id:String(i),status:'confirmed',purpose:t.category,compensationYear:i===0?2025:null,keys:[C.transactionKey(t)]}));
+  const a=C.analysis(s,2026);assert.equal(a.income,10000);assert.equal(a.expense,10000);assert.equal(a.excluded,30000);assert.equal(a.compensation[2025],10000);assert.equal(a.compensation[2026],undefined);assert.equal(a.unknown,1);
+  s.notes[0].compensationYear=null;assert.equal(C.analysis(s,2026).bonusUnknown,10000);
+  s.notes[1].status='pending';assert.equal(C.analysis(s,2026).expense,20000);
+});
+test('extended note metadata round trips and rejects invalid compensation years',()=>{
+  const s=C.emptyState();s.notes=[{id:'year',title:'虚构薪酬',detail:'',source:'测试',status:'confirmed',purpose:'bonus',keys:[],compensationYear:2025}];assert.deepEqual(C.validateState(s),s);s.notes[0].compensationYear=2025.5;assert.throws(()=>C.validateState(s));
+});
+test('independent financial natures share one cross-month event without overwriting categories',()=>{
+ const s=C.emptyState(),a={date:'2025-09-01',type:'支出',category:'原分类',amount:10000,currency:'人民币'},b={...a,date:'2025-10-01',type:'收入',amount:4000};s.ledger={transactions:[a,b]};s.notes=[{id:'buy',eventId:'device',purpose:'investment',status:'confirmed',keys:[C.transactionKey(a)]},{id:'sell',eventId:'device',purpose:'disposal',status:'confirmed',keys:[C.transactionKey(b)]}];const g=C.analysis(s,2025).eventGroups;assert.equal(g.length,1);assert.equal(g[0].net,6000);assert.equal(s.ledger.transactions[0].category,'原分类');
+});
+
+test('cash-flow analysis includes debt principal and prepaid cash outlays but excludes confirmed internal repayment',()=>{
+ const s=C.emptyState(),types=['debt','prepaid','internal','adjustment'];s.ledger={transactions:types.map((kind,i)=>({date:`2025-02-0${i+1}`,type:'支出',category:kind,amount:10000,currency:'CNY'}))};s.notes=s.ledger.transactions.map((t,i)=>({id:String(i),purpose:types[i],status:'confirmed',keys:[C.transactionKey(t)]}));
+ const a=C.analysis(s,2025);assert.equal(a.cashExpense,20000);assert.equal(a.expense,0);assert.equal(a.cashDifference,-20000);assert.equal(a.adjustmentCount,2);
+ s.notes[2].status='pending';assert.equal(C.analysis(s,2025).cashExpense,30000);assert.equal(C.analysis(s,2025).unknown,1);
+});
+test('monthly estimates support ranges and explicit additions without treating older estimates as reviewed',()=>{
+ const s=C.emptyState();const n={id:'monthly-forecast',status:'confirmed',source:'虚构估算',detail:JSON.stringify({salary:500000,fixed:100000,other:150000})};s.notes=[n];assert.equal(C.monthlyEstimate(s).reviewed,false);
+ n.detail=JSON.stringify({version:2,asOf:'2025-02-01',salary:500000,fixed:100000,other:150000,otherHigh:200000,additional:10000});const f=C.monthlyEstimate(s);assert.equal(f.low,190000);assert.equal(f.high,240000);assert.equal(f.reviewed,true);
+ n.detail=JSON.stringify({...f.data,otherHigh:100000});assert.equal(C.monthlyEstimate(s),null);n.detail='{}';assert.equal(C.monthlyEstimate(s),null);
+});
+test('unassigned bonuses include ambiguous or unlinked original bonus income',()=>{
+ const s=C.emptyState(),t={date:'2026-02-01',type:'收入',category:'工资/奖金',amount:50000,currency:'CNY'};s.ledger={transactions:[t]};assert.equal(C.analysis(s,2026).unassignedBonus,50000);s.notes=[{id:'b',status:'confirmed',purpose:'bonus',compensationYear:2025,keys:[C.transactionKey(t)]}];assert.equal(C.analysis(s,2026).unassignedBonus,0);assert.equal(C.analysis(s,2026).compensation[2025],50000);
+ s.notes.push({...s.notes[0],id:'other'});assert.equal(C.analysis(s,2026).unassignedBonus,50000);assert.equal(C.analysis(s,2026).compensation[2025],undefined);
+});
+test('verified noncash entries and conflicting background notes never manufacture cash or consumption',()=>{
+ const s=C.emptyState(),t={date:'2026-02-01',type:'收入',category:'公积金',amount:10000,currency:'CNY'};s.ledger={transactions:[t]};s.notes=[{id:'n',status:'confirmed',purpose:'noncash',keys:[C.transactionKey(t)]}];assert.equal(C.analysis(s,2026).cashIncome,0);
+ s.notes.push({id:'background',status:'confirmed',purpose:'unknown',keys:[C.transactionKey(t)]});assert.equal(C.cashflow(s,'2026-02').unreviewed,1);assert.equal(C.cashflow(s,'2026-02').bucketCounts.noncash,0);assert.equal(C.analysis(s,2026).unknown,1);
+});
+
+test('month coverage distinguishes an unfinished export from a quiet historical month',()=>{
+ const tx=[{date:'2024-02-02'},{date:'2024-02-20'}];
+ assert.deepEqual(C.periodCoverage(tx,'2024-02'),{count:2,start:'2024-02-02',end:'2024-02-20',partial:true});
+ tx.push({date:'2024-02-29'});assert.equal(C.periodCoverage(tx,'2024-02').partial,false);
+ tx.push({date:'2024-03-02'});assert.equal(C.periodCoverage(tx.slice(0,2).concat(tx[3]),'2024-02').partial,false);
+});
+test('empty and invalid months preserve unknown coverage instead of implying zero cash flow',()=>{
+ const tx=[{date:'2025-01-01'}],empty={count:0,start:null,end:null,partial:false};
+ for(const month of ['',null,'2025-13','2025-02'])assert.deepEqual(C.periodCoverage(tx,month),empty);
+ assert.deepEqual(C.periodCoverage([],'2025-01'),empty);
+});
